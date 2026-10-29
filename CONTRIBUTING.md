@@ -29,4 +29,4 @@ cargo run --release --bin fms -- bench --paths 1000000
 
 ## License
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this repository shall be dual-licensed under **MIT** and **Apache-2.0**, without any additional terms or conditions.
+By submitting a contribution to this repository, you agree that your contribution will be licensed under the **GNU General Public License v3.0 (GPL-3.0)** ([LICENSE](LICENSE)).

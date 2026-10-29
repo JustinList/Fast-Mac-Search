@@ -3,7 +3,7 @@
 **Sub-millisecond, zero-trust encrypted search-as-you-type for macOS & Apple Silicon.**
 
 [![CI](https://github.com/JustinList/fast-mac-search/actions/workflows/ci.yml/badge.svg)](https://github.com/JustinList/fast-mac-search/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: macOS 14+ (arm64)](https://img.shields.io/badge/platform-macOS%2014%2B%20(Apple%20Silicon)-black?logo=apple)](#install-the-mac-app-zero-cli)
 [![Built with Rust & Swift 6](https://img.shields.io/badge/stack-Rust%20%2B%20Swift%206-orange)](#architecture)
 
@@ -148,4 +148,4 @@ See [SECURITY.md](SECURITY.md) for full cryptographic details:
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Dual-licensed under **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)) at your option.
+Licensed under the **GNU General Public License v3.0 (GPL-3.0)** — see [LICENSE](LICENSE) for full details.
