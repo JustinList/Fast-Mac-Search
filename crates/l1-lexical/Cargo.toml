@@ -1,0 +1,15 @@
+[package]
+name = "fms-l1-lexical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Encrypted Tantivy BM25 + FST prefix content search and fast text extractor over fms-crypto-vfs"
+
+[dependencies]
+fms-crypto-vfs.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true

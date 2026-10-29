@@ -1,0 +1,23 @@
+[package]
+name = "fms-crypto-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zero-trust 16KB AES-256-GCM virtual file layer, Tantivy Directory backend, and Secure Enclave / Keychain / Argon2id hybrid key provider for Fast Mac Search"
+
+[dependencies]
+aes-gcm.workspace = true
+argon2.workspace = true
+blake3.workspace = true
+hkdf.workspace = true
+libc.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true

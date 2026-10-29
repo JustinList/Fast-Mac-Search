@@ -1,0 +1,26 @@
+[package]
+name = "fms-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fast Mac Search instant CLI (`fms`) and background core daemon (`searchd`)"
+
+[[bin]]
+name = "fms"
+path = "src/main.rs"
+
+[[bin]]
+name = "searchd"
+path = "src/searchd.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fms-core-engine.workspace = true
+fms-crypto-vfs.workspace = true
+fms-fs-indexer.workspace = true
+fms-l0-arena.workspace = true
+fms-system1-predictor.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

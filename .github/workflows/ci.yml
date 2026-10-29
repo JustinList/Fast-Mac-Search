@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos-arm64:
+    name: Build & Test (macOS Apple Silicon)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust dependency cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust workspace unit & zero-plaintext integration tests
+        run: cargo test --workspace
+
+      - name: Build release Rust binaries (fms + searchd)
+        run: cargo build --release --locked
+
+      - name: Build native Swift 6 AppKit UI
+        working-directory: clients/macos-ui
+        run: swift build -c release

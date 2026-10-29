@@ -1,0 +1,17 @@
+[package]
+name = "fms-l2-semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "f16-quantized HNSW/NEON semantic vector index and pluggable 128-dim ANE/Micro embedder persisted over fms-crypto-vfs"
+
+[dependencies]
+ahash.workspace = true
+blake3.workspace = true
+fms-crypto-vfs.workspace = true
+half.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

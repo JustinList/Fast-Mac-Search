@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crypto-vfs",
+    "crates/fs-indexer",
+    "crates/l0-arena",
+    "crates/l1-lexical",
+    "crates/l2-semantic",
+    "crates/system1-predictor",
+    "crates/core-engine",
+    "clients/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Fast Mac Search Contributors"]
+repository = "https://github.com/JustinList/fast-mac-search"
+rust-version = "1.88"
+
+[workspace.dependencies]
+# Internal workspace crates
+fms-crypto-vfs = { path = "crates/crypto-vfs" }
+fms-fs-indexer = { path = "crates/fs-indexer" }
+fms-l0-arena = { path = "crates/l0-arena" }
+fms-l1-lexical = { path = "crates/l1-lexical" }
+fms-l2-semantic = { path = "crates/l2-semantic" }
+fms-system1-predictor = { path = "crates/system1-predictor" }
+fms-core-engine = { path = "crates/core-engine" }
+
+# Cryptography & Zero-Trust Storage
+aes-gcm = "0.10"
+argon2 = "0.5"
+blake3 = "1.8"
+hkdf = "0.12"
+rand = "0.8"
+sha2 = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Search, Fuzzy Matching & Storage
+tantivy = "0.27"
+nucleo-matcher = "0.3"
+ignore = "0.4"
+lru = "0.16"
+half = { version = "2.4", features = ["serde"] }
+
+# Concurrency, OS & Serialization
+ahash = { version = "0.8", features = ["serde"] }
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive", "env"] }
+crossbeam-channel = "0.5"
+libc = "0.2"
+parking_lot = "0.12"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

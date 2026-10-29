@@ -1,0 +1,14 @@
+[package]
+name = "fms-system1-predictor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sub-0.2ms Contextual Markov Frecency Graph, query intent classifier, and speculative ghost-text autocomplete"
+
+[dependencies]
+ahash.workspace = true
+fms-crypto-vfs.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true

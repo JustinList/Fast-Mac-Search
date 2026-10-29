@@ -1,0 +1,25 @@
+[package]
+name = "fms-core-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "3-Tier parallel search-as-you-type orchestrator, dynamic RRF ranker, multi-volume encrypted shard manager, and Unix Domain Socket IPC protocol"
+
+[dependencies]
+ahash.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+fms-crypto-vfs.workspace = true
+fms-fs-indexer.workspace = true
+fms-l0-arena.workspace = true
+fms-l1-lexical.workspace = true
+fms-l2-semantic.workspace = true
+fms-system1-predictor.workspace = true
+libc.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true

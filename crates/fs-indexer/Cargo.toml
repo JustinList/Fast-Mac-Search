@@ -1,0 +1,18 @@
+[package]
+name = "fms-fs-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-throughput macOS getattrlistbulk(2) crawler, FSEvents checkpoint watcher, and Volume UUID external-drive shard discovery"
+
+[dependencies]
+blake3.workspace = true
+crossbeam-channel.workspace = true
+ignore.workspace = true
+libc.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

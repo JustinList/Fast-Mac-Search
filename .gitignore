@@ -1,0 +1,21 @@
+# Rust & Release distribution artifacts
+/target/
+/dist/
+**/*.rs.bk
+
+# Swift build artifacts
+clients/macos-ui/.build/
+clients/macos-ui/.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+
+# Encrypted index shards & sockets
+.fastindex/
+*.sock
+*.fastshard
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*

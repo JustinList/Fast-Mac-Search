@@ -1,0 +1,6 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+    "--cfg", "aes_armv8",
+    "--cfg", "polyval_armv8",
+    "-C", "target-feature=+aes,+neon,+sha2",
+]

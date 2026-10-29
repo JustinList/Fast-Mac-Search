@@ -1,0 +1,18 @@
+[package]
+name = "fms-l0-arena"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sub-0.5ms in-memory path arena using ARM NEON 64-bit SIMD bitmask filtering, mlock(2) memory protection, and Nucleo Smith-Waterman fuzzy matching"
+
+[dependencies]
+ahash.workspace = true
+fms-crypto-vfs.workspace = true
+libc.workspace = true
+nucleo-matcher.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
