@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import ServiceManagement
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -9,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: SpotlightPanel!
     private var overlayController: SearchOverlayController!
     private var driveManager: DriveManagerWindowController!
+    private var conversationViewer: ConversationViewerWindowController!
 
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
@@ -48,12 +50,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.openDriveManager()
         }
 
-        // 3. Build visual Drives & Folders Manager window
+        // 3. Build visual Drives Manager + Encrypted AI Conversation Reader windows
         driveManager = DriveManagerWindowController(
             ipc: ipc,
             onTriggerFolderPicker: { [weak self] in self?.presentFolderPicker() },
             onRequestRefresh: { [weak self] in self?.refreshDaemonStatusNow() }
         )
+        conversationViewer = ConversationViewerWindowController(ipc: ipc)
+        overlayController.onOpenConversation = { [weak self] sessionId, highlightQuery in
+            self?.conversationViewer.presentConversation(sessionId: sessionId, highlightQuery: highlightQuery)
+        }
 
         setupStatusBar()
         registerGlobalOptionSpaceHotKey()
@@ -61,16 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         observeVolumeMounts()
         startStatusPolling()
 
-        // Refresh initial status; if zero drives indexed on very first launch, show a welcoming search bar pill;
+        // Refresh initial status; if zero drives & zero AI chats indexed on very first launch, show Drive Manager;
         // otherwise stay quietly tucked in the Menu Bar until the user presses ⌥Space or clicks ⚡!
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self = self else { return }
             self.refreshDaemonStatusNow { status in
-                if (status?.total_paths ?? 0) == 0 {
+                if (status?.total_paths ?? 0) == 0 && (status?.llm_sessions_total ?? 0) == 0 {
                     self.openDriveManager()
                 }
             }
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showOverlay()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -84,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "FastMacSearchStatusItem"
         if let btn = statusItem.button {
             let img = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Fast Mac Search")
             img?.isTemplate = true
@@ -150,12 +162,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let tot = NumberFormatter.localizedString(from: NSNumber(value: st.indexing.entries_total), number: .decimal)
                 btn.toolTip = "⚡ Indexing \(st.indexing.active_target) (\(st.indexing.phase)): \(done) / \(tot) items (\(scanned) files)…"
             } else {
-                btn.toolTip = "⚡ Indexing \(st.indexing.active_target) (\(st.indexing.phase)): \(scanned) files scanned…"
+                btn.toolTip = "⚡ \(st.indexing.phase) (\(st.indexing.active_target))…"
             }
         } else {
             stopPulsingAnimation()
             let total = NumberFormatter.localizedString(from: NSNumber(value: st.total_paths), number: .decimal)
-            btn.toolTip = "Fast Mac Search — \(total) files encrypted across \(st.shard_count) drive(s) · Press ⌥Space to search"
+            let chats = NumberFormatter.localizedString(from: NSNumber(value: st.llm_sessions_total), number: .decimal)
+            btn.toolTip = "Fast Mac Search — \(total) files + \(chats) AI chats encrypted · Press ⌥Space to search"
         }
     }
 
@@ -170,7 +183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in
                 guard let self = self, let btn = self.statusItem.button else { return }
                 self.pulsePhase += 0.28
-                // Smooth cosine pulse between 0.30 and 1.00 opacity
                 let alpha = 0.65 + 0.35 * cos(self.pulsePhase)
                 btn.alphaValue = CGFloat(alpha)
             }
@@ -190,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - Dynamic Menu Bar Dropdown (1-Click Drives Picker + Status)
+    // MARK: - Dynamic Menu Bar Dropdown (Files + Cross-LLM Memory + MCP)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -200,9 +212,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openItem.keyEquivalentModifierMask = [.option]
         menu.addItem(openItem)
 
+        let aiSearchItem = NSMenuItem(title: "Search AI Conversations…", action: #selector(openAiChatsOverlay), keyEquivalent: "3")
+        aiSearchItem.keyEquivalentModifierMask = [.command]
+        aiSearchItem.target = self
+        menu.addItem(aiSearchItem)
+
         menu.addItem(.separator())
 
-        // Live Indexing / Status Row
+        // Live Indexing / Status Rows
         if let st = latestStatus {
             if st.indexing.is_indexing {
                 let scanned = NumberFormatter.localizedString(from: NSNumber(value: st.indexing.files_scanned), number: .decimal)
@@ -211,8 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let done = NumberFormatter.localizedString(from: NSNumber(value: st.indexing.entries_ingested), number: .decimal)
                     let tot = NumberFormatter.localizedString(from: NSNumber(value: st.indexing.entries_total), number: .decimal)
                     label = "⚡ Indexing \(st.indexing.active_target): \(done) / \(tot) items…"
-                } else {
+                } else if st.indexing.files_scanned > 0 {
                     label = "⚡ Scanning \(st.indexing.active_target): \(scanned) files…"
+                } else {
+                    label = "⚡ \(st.indexing.phase)…"
                 }
                 let progressItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
                 progressItem.isEnabled = false
@@ -227,11 +246,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 readyItem.isEnabled = false
                 menu.addItem(readyItem)
             }
+
+            let chatCount = NumberFormatter.localizedString(from: NSNumber(value: st.llm_sessions_total), number: .decimal)
+            let provBreakdown = st.llm_providers
+                .map { "\($0.provider): \($0.count)" }
+                .joined(separator: ", ")
+            let llmTitle = provBreakdown.isEmpty
+                ? "✦ \(chatCount) AI chats encrypted"
+                : "✦ \(chatCount) AI chats (\(provBreakdown))"
+            let llmStatusItem = NSMenuItem(title: llmTitle, action: nil, keyEquivalent: "")
+            llmStatusItem.isEnabled = false
+            menu.addItem(llmStatusItem)
         } else {
             let starting = NSMenuItem(title: "Starting background searchd…", action: nil, keyEquivalent: "")
             starting.isEnabled = false
             menu.addItem(starting)
         }
+
+        menu.addItem(.separator())
+
+        // Cross-LLM Memory & MCP Section
+        let aiHeader = NSMenuItem(title: "Cross-LLM Memory & MCP", action: nil, keyEquivalent: "")
+        aiHeader.isEnabled = false
+        menu.addItem(aiHeader)
+
+        let syncChatsItem = NSMenuItem(title: "Sync Local AI Chats Now", action: #selector(handleSyncLlmChats), keyEquivalent: "r")
+        syncChatsItem.target = self
+        menu.addItem(syncChatsItem)
+
+        let importExportItem = NSMenuItem(title: "Import ChatGPT / Claude Export (.json)…", action: #selector(presentLlmExportImporter), keyEquivalent: "i")
+        importExportItem.target = self
+        menu.addItem(importExportItem)
+
+        let mcpInstallItem = NSMenuItem(title: "Enable MCP Server for Claude Desktop…", action: #selector(handleInstallMcpServer), keyEquivalent: "")
+        mcpInstallItem.target = self
+        menu.addItem(mcpInstallItem)
 
         menu.addItem(.separator())
 
@@ -281,6 +330,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "Quit Fast Mac Search", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    @objc private func openAiChatsOverlay() {
+        showOverlay()
+        overlayController.selectScope(index: 2)
+    }
+
+    @objc private func handleSyncLlmChats() {
+        ipc.syncLlmChatsAsync()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.refreshDaemonStatusNow()
+        }
+    }
+
+    @objc private func presentLlmExportImporter() {
+        hideOverlay()
+        NSApp.activate(ignoringOtherApps: true)
+
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Import ChatGPT or Claude Conversations Export"
+        openPanel.message = "Select your `conversations.json` export file. Conversations are parsed directly into AES-256-GCM encrypted memory."
+        openPanel.prompt = "Encrypt & Import"
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.allowedContentTypes = [.json]
+
+        guard openPanel.runModal() == .OK, let url = openPanel.url else { return }
+        let client = self.ipc
+        let filePath = url.path
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let rep = try client.importLlmExport(path: filePath)
+                DispatchQueue.main.async { [weak self] in
+                    self?.refreshDaemonStatusNow()
+                    let alert = NSAlert()
+                    alert.messageText = "AI Conversations Encrypted & Indexed"
+                    alert.informativeText = "Imported \(rep.files_parsed) conversations in \(String(format: "%.1f", rep.elapsed_ms)) ms (\(rep.sessions_total) total AI chats now searchable via ⌥Space)."
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Could Not Import Export File"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    @objc private func handleInstallMcpServer() {
+        hideOverlay()
+        NSApp.activate(ignoringOtherApps: true)
+
+        let bundledFms = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/fms").path
+        let fallbackFms = "/Applications/Fast Mac Search.app/Contents/Helpers/fms"
+        let fmsPath = FileManager.default.isExecutableFile(atPath: bundledFms) ? bundledFms : fallbackFms
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let claudeConfigPath = "\(home)/Library/Application Support/Claude/claude_desktop_config.json"
+        let parentDir = (claudeConfigPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
+
+        var rootDict: [String: Any] = [:]
+        if let existingData = FileManager.default.contents(atPath: claudeConfigPath),
+           let parsed = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any]
+        {
+            rootDict = parsed
+        }
+        var mcpServers = (rootDict["mcpServers"] as? [String: Any]) ?? [:]
+        mcpServers["fast-mac-search"] = [
+            "command": fmsPath,
+            "args": ["mcp"]
+        ]
+        rootDict["mcpServers"] = mcpServers
+
+        if let outData = try? JSONSerialization.data(withJSONObject: rootDict, options: [.prettyPrinted, .sortedKeys]) {
+            try? outData.write(to: URL(fileURLWithPath: claudeConfigPath), options: .atomic)
+        }
+
+        let cliSnippet = "claude mcp add fast-mac-search -- \"\(fmsPath)\" mcp"
+        let alert = NSAlert()
+        alert.messageText = "MCP Server Enabled for Claude Desktop"
+        alert.informativeText = """
+        Registered `fast-mac-search` in:
+        \(claudeConfigPath)
+
+        Restart Claude Desktop to let Claude search your encrypted files and cross-LLM history (< 2 ms).
+
+        For Claude Code or Codex CLI, you can also run:
+        \(cliSnippet)
+        """
+        alert.addButton(withTitle: "Copy CLI Command")
+        alert.addButton(withTitle: "Done")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(cliSnippet, forType: .string)
+        }
     }
 
     @objc private func handleQuickDriveMenuClick(_ sender: NSMenuItem) {
@@ -359,14 +510,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setupEventMonitors() {
-        // 1. Local key monitor for ⌘Y QuickLook preview & ⌘, Drives Manager while Search Bar is focused
+        // 1. Local key monitor for ⌘1/⌘2/⌘3 scope switching, ⌘Y preview/reader, & ⌘, Drives Manager
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             if event.modifierFlags.contains(.command) {
                 let ch = event.charactersIgnoringModifiers?.lowercased()
-                if ch == "y" && self.panel.isVisible {
-                    self.overlayController.toggleQuickLook()
-                    return nil
+                if self.panel.isVisible {
+                    if ch == "1" {
+                        self.overlayController.selectScope(index: 0)
+                        return nil
+                    }
+                    if ch == "2" {
+                        self.overlayController.selectScope(index: 1)
+                        return nil
+                    }
+                    if ch == "3" {
+                        self.overlayController.selectScope(index: 2)
+                        return nil
+                    }
+                    if ch == "y" {
+                        self.overlayController.toggleQuickLook()
+                        return nil
+                    }
                 }
                 if ch == "," {
                     self.openDriveManager()

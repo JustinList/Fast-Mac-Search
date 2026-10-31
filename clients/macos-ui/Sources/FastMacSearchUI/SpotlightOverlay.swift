@@ -41,17 +41,19 @@ public final class SpotlightPanel: NSPanel {
 
 @MainActor
 public final class SearchOverlayController: NSViewController, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
-    public static let barWidth: CGFloat = 720
+    public static let barWidth: CGFloat = 750
     public static let collapsedHeight: CGFloat = 62
     public static let maxExpandedHeight: CGFloat = 468
 
     private let ipc: SearchdIPCClient
     public var onOpenDriveManager: (() -> Void)?
+    public var onOpenConversation: ((String, String) -> Void)?
     public var onRequestDismiss: (() -> Void)?
 
     private var hits: [RankedHitPayload] = []
     private var currentGhost: GhostPredictionPayload?
     private var capturedAppBundleId: String?
+    private var selectedScopeIndex: Int = 0 // 0 = all, 1 = files, 2 = chats
     private let queryQueue = DispatchQueue(label: "dev.fastmacsearch.ui.query", qos: .userInteractive)
     private var querySeq: UInt64 = 0
 
@@ -60,6 +62,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     private let searchField = NSTextField()
     private let ghostLabel = NSTextField(labelWithString: "")
     private let latencyPill = NSTextField(labelWithString: "⌥Space")
+    private let scopeControl = NSSegmentedControl(labels: ["All", "Files", "AI"], trackingMode: .selectOne, target: nil, action: nil)
     private let drivesBtn = NSButton()
     private let closeBtn = NSButton()
     private let divider = NSBox()
@@ -93,13 +96,13 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         iconLabel.textColor = .secondaryLabelColor
         vibrancyView.addSubview(iconLabel)
 
-        ghostLabel.font = .systemFont(ofSize: 20, weight: .regular)
+        ghostLabel.font = .systemFont(ofSize: 19, weight: .regular)
         ghostLabel.textColor = NSColor.tertiaryLabelColor
         ghostLabel.lineBreakMode = .byTruncatingTail
         vibrancyView.addSubview(ghostLabel)
 
-        searchField.placeholderString = "Search files, content, or concepts…"
-        searchField.font = .systemFont(ofSize: 20, weight: .regular)
+        searchField.placeholderString = "Search files, AI chats (@claude, @codex), or concepts…"
+        searchField.font = .systemFont(ofSize: 19, weight: .regular)
         searchField.isBordered = false
         searchField.drawsBackground = false
         searchField.focusRingType = .none
@@ -110,6 +113,15 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         latencyPill.textColor = .secondaryLabelColor
         latencyPill.alignment = .right
         vibrancyView.addSubview(latencyPill)
+
+        scopeControl.controlSize = .small
+        scopeControl.font = .systemFont(ofSize: 11, weight: .medium)
+        scopeControl.segmentStyle = .rounded
+        scopeControl.selectedSegment = 0
+        scopeControl.target = self
+        scopeControl.action = #selector(didChangeScopeSegment)
+        scopeControl.toolTip = "Filter: All (⌘1) · Files (⌘2) · AI Chats (⌘3)"
+        vibrancyView.addSubview(scopeControl)
 
         // 1-click Drives & Folders picker button directly on the search bar
         drivesBtn.bezelStyle = .inline
@@ -139,7 +151,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         column.width = w - 24
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = 50
+        tableView.rowHeight = 52
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .regular
         tableView.style = .inset
@@ -162,12 +174,13 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let w = Self.barWidth
         let headerCenterY = h - (Self.collapsedHeight / 2.0)
 
-        iconLabel.frame = NSRect(x: 18, y: headerCenterY - 14, width: 28, height: 28)
-        ghostLabel.frame = NSRect(x: 48, y: headerCenterY - 14, width: w - 295, height: 28)
-        searchField.frame = NSRect(x: 48, y: headerCenterY - 14, width: w - 295, height: 28)
-        latencyPill.frame = NSRect(x: w - 242, y: headerCenterY - 8, width: 170, height: 18)
-        drivesBtn.frame = NSRect(x: w - 64, y: headerCenterY - 12, width: 24, height: 24)
-        closeBtn.frame = NSRect(x: w - 34, y: headerCenterY - 12, width: 22, height: 22)
+        iconLabel.frame = NSRect(x: 18, y: headerCenterY - 14, width: 26, height: 28)
+        ghostLabel.frame = NSRect(x: 48, y: headerCenterY - 13, width: 358, height: 26)
+        searchField.frame = NSRect(x: 48, y: headerCenterY - 13, width: 358, height: 26)
+        latencyPill.frame = NSRect(x: 410, y: headerCenterY - 8, width: 124, height: 18)
+        scopeControl.frame = NSRect(x: 540, y: headerCenterY - 11, width: 140, height: 22)
+        drivesBtn.frame = NSRect(x: w - 62, y: headerCenterY - 12, width: 24, height: 24)
+        closeBtn.frame = NSRect(x: w - 34, y: headerCenterY - 11, width: 22, height: 22)
 
         let showResults = h > Self.collapsedHeight + 4
         divider.isHidden = !showResults
@@ -192,14 +205,50 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         relayoutSubviews(forHeight: clamped)
     }
 
+    public func selectScope(index: Int) {
+        let clamped = max(0, min(2, index))
+        selectedScopeIndex = clamped
+        scopeControl.selectedSegment = clamped
+        updatePlaceholderForScope()
+        runKeystrokeQuery(searchField.stringValue)
+    }
+
+    private func currentScopeWireValue() -> String {
+        switch selectedScopeIndex {
+        case 1: return "files"
+        case 2: return "chats"
+        default: return "all"
+        }
+    }
+
+    private func updatePlaceholderForScope() {
+        switch selectedScopeIndex {
+        case 1:
+            searchField.placeholderString = "Search files, paths, or document contents…"
+        case 2:
+            searchField.placeholderString = "Search Claude, Codex, Gemini & ChatGPT chats…"
+        default:
+            searchField.placeholderString = "Search files, AI chats (@claude, @codex), or concepts…"
+        }
+    }
+
     public func prepareForPresentation(previousAppBundleId: String?) {
         self.capturedAppBundleId = previousAppBundleId
-        let desiredHeight = hits.isEmpty
-            ? Self.collapsedHeight
-            : (Self.collapsedHeight + CGFloat(hits.count) * 52 + 12)
-        resizePanelKeepingTopEdge(targetHeight: desiredHeight)
+        if selectedScopeIndex == 2 && hits.isEmpty {
+            runKeystrokeQuery(searchField.stringValue)
+        } else {
+            let desiredHeight = hits.isEmpty
+                ? Self.collapsedHeight
+                : (Self.collapsedHeight + CGFloat(hits.count) * 54 + 12)
+            resizePanelKeepingTopEdge(targetHeight: desiredHeight)
+        }
         self.view.window?.makeFirstResponder(searchField)
         searchField.selectText(nil)
+    }
+
+    @objc private func didChangeScopeSegment() {
+        selectScope(index: scopeControl.selectedSegment)
+        self.view.window?.makeFirstResponder(searchField)
     }
 
     @objc private func didTapDrivesButton() {
@@ -218,12 +267,15 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     private func runKeystrokeQuery(_ text: String) {
         querySeq &+= 1
         let mySeq = querySeq
+        let scopeWire = currentScopeWireValue()
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty {
+
+        // Collapse when input is empty UNLESS the user selected the `AI` tab (which shows recent chats!)
+        if trimmed.isEmpty && scopeWire != "chats" {
             self.hits = []
             self.currentGhost = nil
             self.ghostLabel.stringValue = ""
-            self.latencyPill.stringValue = "⌥Space · Esc to hide"
+            self.latencyPill.stringValue = "⌥Space"
             self.tableView.reloadData()
             resizePanelKeepingTopEdge(targetHeight: Self.collapsedHeight)
             return
@@ -234,7 +286,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
         queryQueue.async { [weak self] in
             do {
-                let resp = try client.query(text, limit: 10, context: ctx)
+                let resp = try client.query(text, limit: 10, scope: scopeWire, context: ctx)
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self, self.querySeq == mySeq else { return }
 
@@ -244,15 +296,15 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
                     let ms = Double(resp.total_elapsed_us) / 1000.0
                     if resp.total_indexed_paths == 0 {
-                        self.latencyPill.stringValue = "Click drive icon ↗ to index"
+                        self.latencyPill.stringValue = "Index drive ↗"
                     } else {
-                        self.latencyPill.stringValue = String(format: "⚡ %.2f ms · %@", ms, resp.intent)
+                        self.latencyPill.stringValue = String(format: "⚡ %.2f ms", ms)
                     }
 
                     self.tableView.reloadData()
                     let targetH = self.hits.isEmpty
                         ? Self.collapsedHeight
-                        : (Self.collapsedHeight + CGFloat(self.hits.count) * 52 + 12)
+                        : (Self.collapsedHeight + CGFloat(self.hits.count) * 54 + 12)
                     self.resizePanelKeepingTopEdge(targetHeight: targetH)
 
                     if !self.hits.isEmpty {
@@ -262,7 +314,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             } catch {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self, self.querySeq == mySeq else { return }
-                    self.latencyPill.stringValue = "Starting engine…"
+                    self.latencyPill.stringValue = "Starting…"
                     self.ghostLabel.stringValue = ""
                 }
             }
@@ -315,6 +367,14 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let row = tableView.selectedRow
         guard row >= 0 && row < hits.count else { return }
         let hit = hits[row]
+
+        if hit.is_llm_chat, let sid = hit.llm_session_id {
+            let q = searchField.stringValue
+            onRequestDismiss?()
+            onOpenConversation?(sid, q)
+            return
+        }
+
         guard hit.volume_online else {
             NSSound.beep()
             return
@@ -329,11 +389,26 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let row = tableView.selectedRow
         guard row >= 0 && row < hits.count else { return }
         let hit = hits[row]
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)])
-        onRequestDismiss?()
+        if FileManager.default.fileExists(atPath: hit.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)])
+            onRequestDismiss?()
+        } else {
+            NSSound.beep()
+        }
     }
 
     public func toggleQuickLook() {
+        let row = tableView.selectedRow
+        if row >= 0 && row < hits.count {
+            let hit = hits[row]
+            if hit.is_llm_chat, let sid = hit.llm_session_id {
+                let q = searchField.stringValue
+                onRequestDismiss?()
+                onOpenConversation?(sid, q)
+                return
+            }
+        }
+
         guard let panel = QLPreviewPanel.shared() else { return }
         if QLPreviewPanel.sharedPreviewPanelExists() && panel.isVisible {
             panel.orderOut(nil)
@@ -384,34 +459,34 @@ private final class HitRowView: NSTableCellView {
     private let badgeLabel = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 690, height: 50))
+        super.init(frame: NSRect(x: 0, y: 0, width: 720, height: 52))
         self.identifier = identifier
 
-        iconView.frame = NSRect(x: 12, y: 9, width: 32, height: 32)
+        iconView.frame = NSRect(x: 12, y: 10, width: 32, height: 32)
         addSubview(iconView)
 
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.frame = NSRect(x: 54, y: 25, width: 450, height: 18)
+        titleLabel.frame = NSRect(x: 54, y: 27, width: 515, height: 18)
         addSubview(titleLabel)
 
         subtitleLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
         subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.lineBreakMode = .byTruncatingMiddle
-        subtitleLabel.frame = NSRect(x: 54, y: 7, width: 490, height: 16)
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.frame = NSRect(x: 54, y: 8, width: 525, height: 16)
         addSubview(subtitleLabel)
 
-        badgeLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        badgeLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
         badgeLabel.alignment = .right
-        badgeLabel.frame = NSRect(x: 550, y: 17, width: 130, height: 16)
+        badgeLabel.frame = NSRect(x: 584, y: 18, width: 126, height: 16)
         addSubview(badgeLabel)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    private static func cachedIcon(for hit: RankedHitPayload) -> NSImage {
+    private static func cachedFileIcon(for hit: RankedHitPayload) -> NSImage {
         if hit.is_dir {
             if let cached = iconCache["__dir__"] { return cached }
             let img = NSWorkspace.shared.icon(for: .folder)
@@ -433,7 +508,31 @@ private final class HitRowView: NSTableCellView {
     }
 
     func configure(with hit: RankedHitPayload) {
-        iconView.image = Self.cachedIcon(for: hit)
+        if hit.is_llm_chat {
+            let prov = ConversationViewerWindowController.displayProviderName(hit.llm_provider ?? hit.volume_name)
+            let (sym, color) = ConversationViewerWindowController.providerSymbolAndColor(prov)
+            let cfg = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            iconView.image = NSImage(systemSymbolName: sym, accessibilityDescription: prov)?.withSymbolConfiguration(cfg)
+            iconView.contentTintColor = color
+
+            titleLabel.stringValue = hit.filename
+
+            if let ws = hit.workspace, !ws.isEmpty {
+                let shortWs = (ws as NSString).lastPathComponent
+                subtitleLabel.stringValue = hit.snippet.isEmpty
+                    ? "Workspace: \(shortWs)"
+                    : "\(shortWs)  —  \(hit.snippet)"
+            } else {
+                subtitleLabel.stringValue = hit.snippet.isEmpty ? "Encrypted AI Conversation" : hit.snippet
+            }
+
+            badgeLabel.textColor = color
+            badgeLabel.stringValue = "✦ \(prov)"
+            return
+        }
+
+        iconView.contentTintColor = nil
+        iconView.image = Self.cachedFileIcon(for: hit)
         titleLabel.stringValue = hit.filename
         subtitleLabel.stringValue = hit.snippet.isEmpty ? hit.path : "\(hit.path)  —  \(hit.snippet)"
 

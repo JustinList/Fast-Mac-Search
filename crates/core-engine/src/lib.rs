@@ -23,6 +23,10 @@ use fms_fs_indexer::{
 use fms_l0_arena::L0PathArena;
 use fms_l1_lexical::{EncryptedLexicalIndex, extract_text_from_file};
 use fms_l2_semantic::{EncryptedVectorIndex, MicroSemanticEmbedder, SemanticEmbedder};
+pub use fms_llm_memory::{
+    EncryptedLlmMemory, LlmProvider, LlmProviderCount, LlmSearchHit, LlmSession, LlmSyncReport,
+    LlmTurn,
+};
 use fms_system1_predictor::{
     GhostPrediction, QueryContext, System1Predictor, classify_query_intent,
 };
@@ -77,7 +81,27 @@ impl VolumeShard {
     }
 }
 
-/// Unified ranked search result returned to the CLI or native Swift `NSPanel` UI.
+/// Scope selector for unified Files + Cross-LLM Conversations search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    #[default]
+    All,
+    Files,
+    Chats,
+}
+
+impl SearchScope {
+    pub fn from_tag(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "files" | "file" => Self::Files,
+            "chats" | "chat" | "llm" | "ai" => Self::Chats,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Unified ranked search result returned to the CLI, MCP server, or native Swift `NSPanel` UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankedHit {
     pub doc_id: u64,
@@ -90,6 +114,14 @@ pub struct RankedHit {
     pub is_dir: bool,
     pub volume_name: String,
     pub volume_online: bool,
+    #[serde(default)]
+    pub is_llm_chat: bool,
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    #[serde(default)]
+    pub llm_session_id: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// Complete telemetry + Ghost-Text + Ranked Results payload emitted on every keystroke.
@@ -190,6 +222,10 @@ pub struct EngineStatus {
     pub shards: Vec<ShardStatusSummary>,
     #[serde(default)]
     pub indexing: IndexingProgressSnapshot,
+    #[serde(default)]
+    pub llm_sessions_total: usize,
+    #[serde(default)]
+    pub llm_providers: Vec<LlmProviderCount>,
 }
 
 pub struct EngineConfig {
@@ -219,6 +255,7 @@ pub struct SearchEngine {
     embedder: Arc<dyn SemanticEmbedder>,
     /// Map of `volume_uuid_string -> Arc<VolumeShard>`
     shards: RwLock<AHashMap<String, Arc<VolumeShard>>>,
+    llm_memory: Arc<EncryptedLlmMemory>,
     next_doc_id: AtomicU64,
     active_generation: AtomicU64,
     active_watchers: RwLock<AHashMap<String, (usize, FsEventsWatcher)>>,
@@ -231,12 +268,19 @@ impl SearchEngine {
         let key_dir = config.app_support_dir.join("keys");
         let key_provider = HybridKeyProvider::new(key_dir);
         let cached_se_status = format!("{:?}", key_provider.probe_secure_enclave());
+        let llm_memory = Arc::new(EncryptedLlmMemory::open_or_create(
+            &config.app_support_dir,
+            &key_provider,
+            config.passphrase.as_deref(),
+            config.vfs_config.clone(),
+        )?);
         let engine = Self {
             config,
             key_provider,
             cached_se_status,
             embedder: Arc::new(MicroSemanticEmbedder),
             shards: RwLock::new(AHashMap::new()),
+            llm_memory,
             next_doc_id: AtomicU64::new(1),
             active_generation: AtomicU64::new(0),
             active_watchers: RwLock::new(AHashMap::new()),
@@ -244,6 +288,47 @@ impl SearchEngine {
         };
         engine.autoload_host_cached_shards()?;
         Ok(engine)
+    }
+
+    pub fn llm_memory(&self) -> &Arc<EncryptedLlmMemory> {
+        &self.llm_memory
+    }
+
+    /// Incrementally syncs all local LLM chats (Claude, Codex, Gemini/Antigravity, LM Studio)
+    /// under `$HOME` into AES-256-GCM encrypted memory.
+    pub fn sync_llm_chats(&self) -> Result<LlmSyncReport> {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+        self.sync_llm_chats_from_dir(&home)
+    }
+
+    pub fn sync_llm_chats_from_dir(&self, home_dir: &Path) -> Result<LlmSyncReport> {
+        let is_initial = self.llm_memory.session_count() == 0;
+        if is_initial {
+            self.progress.active_jobs.fetch_add(1, Ordering::SeqCst);
+            self.progress.is_indexing.store(true, Ordering::SeqCst);
+            *self.progress.active_target.write() = "AI Conversations".into();
+            *self.progress.phase.write() = "Encrypting local AI chats".into();
+        }
+        let res = self
+            .llm_memory
+            .sync_from_home(home_dir, self.embedder.as_ref());
+        if is_initial && self.progress.active_jobs.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.progress.is_indexing.store(false, Ordering::SeqCst);
+            *self.progress.phase.write() = "Idle".into();
+        }
+        res
+    }
+
+    /// Imports a ChatGPT or Claude Web `conversations.json` export file into encrypted storage.
+    pub fn import_llm_export(&self, export_json_path: &Path) -> Result<LlmSyncReport> {
+        self.llm_memory
+            .import_export_file(export_json_path, self.embedder.as_ref())
+    }
+
+    pub fn get_llm_session(&self, session_id: &str) -> Option<LlmSession> {
+        self.llm_memory.get_session(session_id)
     }
 
     pub fn with_embedder(mut self, embedder: Arc<dyn SemanticEmbedder>) -> Self {
@@ -757,8 +842,8 @@ impl SearchEngine {
         }
     }
 
-    /// Executes the **3-Tier Parallel System-1 Keystroke Pipeline** with atomic generation
-    /// cancellation and Dynamic Query-Length-Weighted Reciprocal Rank Fusion (RRF)!
+    /// Executes the **3-Tier Parallel System-1 Keystroke Pipeline** across both encrypted
+    /// filesystem shards and cross-LLM conversation memory (`SearchScope::All` by default).
     pub fn search(
         &self,
         raw_query: &str,
@@ -766,15 +851,36 @@ impl SearchEngine {
         ctx: &QueryContext,
         l0_only: bool,
     ) -> SearchResponse {
+        self.search_scoped(raw_query, limit, ctx, l0_only, SearchScope::All)
+    }
+
+    /// Scoped 3-Tier Parallel search supporting `All`, `Files`, and `Chats`, plus inline
+    /// `@claude`, `@codex`, `@gemini`, `@chatgpt`, `@lmstudio`, `@chat`, and `@files` tags!
+    pub fn search_scoped(
+        &self,
+        raw_query: &str,
+        limit: usize,
+        ctx: &QueryContext,
+        l0_only: bool,
+        requested_scope: SearchScope,
+    ) -> SearchResponse {
         let total_started = Instant::now();
         let my_gen = self.active_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let trimmed = raw_query.trim();
+
+        let (scope, provider_filter, stripped_query) =
+            parse_inline_query_scope(raw_query, requested_scope);
+        let trimmed = stripped_query.trim();
         let weights = classify_query_intent(trimmed);
 
         let shards: Vec<Arc<VolumeShard>> = self.shards.read().values().cloned().collect();
-        let total_indexed_paths: usize = shards.iter().map(|s| s.l0.read().len()).sum();
+        let file_paths_count: usize = shards
+            .iter()
+            .map(|s| s.cached_l0_len.load(Ordering::Relaxed))
+            .sum();
+        let llm_sessions_count = self.llm_memory.session_count();
+        let total_indexed_paths = file_paths_count + llm_sessions_count;
 
-        if trimmed.is_empty() || shards.is_empty() || limit == 0 {
+        if limit == 0 {
             return SearchResponse {
                 query: raw_query.to_string(),
                 generation: my_gen,
@@ -788,6 +894,58 @@ impl SearchEngine {
                 hits: Vec::new(),
             };
         }
+
+        // Fast-path for AI Chats-only view (including empty query -> recent conversations!)
+        if scope == SearchScope::Chats {
+            let llm_out = self.llm_memory.search(
+                trimmed,
+                provider_filter,
+                limit,
+                l0_only,
+                self.embedder.as_ref(),
+            );
+            let hits = llm_out
+                .hits
+                .into_iter()
+                .map(|h| llm_hit_to_ranked(h, ctx))
+                .collect();
+            let intent = match provider_filter {
+                Some(p) => format!("AI · {}", p.as_str()),
+                None if trimmed.is_empty() => "Recent AI Chats".to_string(),
+                None => "AI Memory".to_string(),
+            };
+            return SearchResponse {
+                query: raw_query.to_string(),
+                generation: my_gen,
+                intent,
+                ghost_prediction: None,
+                stage1_l0_us: llm_out.l0_us,
+                stage2_l1_us: llm_out.l1_us,
+                stage3_l2_us: llm_out.l2_us,
+                total_elapsed_us: total_started.elapsed().as_micros() as u64,
+                total_indexed_paths,
+                hits,
+            };
+        }
+
+        if trimmed.is_empty()
+            || (shards.is_empty() && (scope == SearchScope::Files || llm_sessions_count == 0))
+        {
+            return SearchResponse {
+                query: raw_query.to_string(),
+                generation: my_gen,
+                intent: weights.intent_label.to_string(),
+                ghost_prediction: None,
+                stage1_l0_us: 0,
+                stage2_l1_us: 0,
+                stage3_l2_us: 0,
+                total_elapsed_us: total_started.elapsed().as_micros() as u64,
+                total_indexed_paths,
+                hits: Vec::new(),
+            };
+        }
+
+        let include_chats = scope == SearchScope::All && llm_sessions_count > 0;
 
         // =========================================================================
         // STAGE 1: System 1 Ghost-Text + Markov Frecency + L0 ARM NEON Arena (<0.5ms)
@@ -819,7 +977,7 @@ impl SearchEngine {
             };
 
             let s1 = shard.system1.read();
-            if ghost_prediction.is_none() {
+            if ghost_prediction.is_none() && raw_query == stripped_query {
                 ghost_prediction = s1.predict_ghost_text(raw_query);
             }
 
@@ -867,12 +1025,11 @@ impl SearchEngine {
                 push_unique_layer(&mut entry.layers, "L0");
             }
         }
-        let stage1_l0_us = stage1_start.elapsed().as_micros() as u64;
+        let mut stage1_l0_us = stage1_start.elapsed().as_micros() as u64;
 
         // =========================================================================
         // STAGE 2 & STAGE 3 (Parallel): L1 Encrypted Tantivy BM25 + L2 Semantic Vector
-        // Aborted automatically if a newer keystroke incremented `active_generation`
-        // or if query is a single character / explicit `l0_only` reflex query!
+        // + Encrypted Cross-LLM Memory Search when `scope == SearchScope::All`!
         // =========================================================================
         let mut stage2_l1_us = 0u64;
         let mut stage3_l2_us = 0u64;
@@ -881,19 +1038,45 @@ impl SearchEngine {
             && trimmed.chars().count() >= 2
             && self.active_generation.load(Ordering::Relaxed) == my_gen;
 
-        if run_deep_tiers {
-            let embedder = Arc::clone(&self.embedder);
-            let run_l2 = trimmed.chars().count() >= 3;
+        let (deep_file_res, llm_out_opt) = rayon::join(
+            || {
+                if !run_deep_tiers || shards.is_empty() {
+                    return None;
+                }
+                let embedder = Arc::clone(&self.embedder);
+                let run_l2 = trimmed.chars().count() >= 3;
 
-            let ((l1_batches, l1_us), (l2_batches, l2_us)) = rayon::join(
-                || {
-                    let t = Instant::now();
-                    let mut all = Vec::with_capacity(shards.len());
-                    for shard in &shards {
-                        if self.active_generation.load(Ordering::Relaxed) != my_gen {
-                            break;
+                Some(rayon::join(
+                    || {
+                        let t = Instant::now();
+                        let mut all = Vec::with_capacity(shards.len());
+                        for shard in &shards {
+                            if self.active_generation.load(Ordering::Relaxed) != my_gen {
+                                break;
+                            }
+                            if let Ok((hits, _)) = shard.l1.search(trimmed, stage_k) {
+                                let mf = shard.manifest.read();
+                                all.push((
+                                    mf.volume.name.clone(),
+                                    mf.volume.mount_point.exists(),
+                                    hits,
+                                ));
+                            }
                         }
-                        if let Ok((hits, _)) = shard.l1.search(trimmed, stage_k) {
+                        (all, t.elapsed().as_micros() as u64)
+                    },
+                    || {
+                        let t = Instant::now();
+                        if !run_l2 {
+                            return (Vec::new(), 0u64);
+                        }
+                        let qvec = embedder.embed_query(trimmed);
+                        let mut all = Vec::with_capacity(shards.len());
+                        for shard in &shards {
+                            if self.active_generation.load(Ordering::Relaxed) != my_gen {
+                                break;
+                            }
+                            let (hits, _) = shard.l2.read().search(&qvec, stage_k);
                             let mf = shard.manifest.read();
                             all.push((
                                 mf.volume.name.clone(),
@@ -901,32 +1084,26 @@ impl SearchEngine {
                                 hits,
                             ));
                         }
-                    }
-                    (all, t.elapsed().as_micros() as u64)
-                },
-                || {
-                    let t = Instant::now();
-                    if !run_l2 {
-                        return (Vec::new(), 0u64);
-                    }
-                    let qvec = embedder.embed_query(trimmed);
-                    let mut all = Vec::with_capacity(shards.len());
-                    for shard in &shards {
-                        if self.active_generation.load(Ordering::Relaxed) != my_gen {
-                            break;
-                        }
-                        let (hits, _) = shard.l2.read().search(&qvec, stage_k);
-                        let mf = shard.manifest.read();
-                        all.push((
-                            mf.volume.name.clone(),
-                            mf.volume.mount_point.exists(),
-                            hits,
-                        ));
-                    }
-                    (all, t.elapsed().as_micros() as u64)
-                },
-            );
+                        (all, t.elapsed().as_micros() as u64)
+                    },
+                ))
+            },
+            || {
+                if include_chats {
+                    Some(self.llm_memory.search(
+                        trimmed,
+                        provider_filter,
+                        limit,
+                        l0_only,
+                        self.embedder.as_ref(),
+                    ))
+                } else {
+                    None
+                }
+            },
+        );
 
+        if let Some(((l1_batches, l1_us), (l2_batches, l2_us))) = deep_file_res {
             stage2_l1_us = l1_us;
             stage3_l2_us = l2_us;
 
@@ -990,10 +1167,23 @@ impl SearchEngine {
                     is_dir: c.is_dir,
                     volume_name: c.volume_name,
                     volume_online: c.volume_online,
+                    is_llm_chat: false,
+                    llm_provider: None,
+                    llm_session_id: None,
+                    workspace: None,
                 }
             })
             .collect();
         drop(first_s1);
+
+        if let Some(llm_out) = llm_out_opt {
+            stage1_l0_us = stage1_l0_us.max(llm_out.l0_us);
+            stage2_l1_us = stage2_l1_us.max(llm_out.l1_us);
+            stage3_l2_us = stage3_l2_us.max(llm_out.l2_us);
+            for h in llm_out.hits {
+                final_hits.push(llm_hit_to_ranked(h, ctx));
+            }
+        }
 
         final_hits.sort_unstable_by(|a, b| b.rrf_score.total_cmp(&a.rrf_score));
         final_hits.truncate(limit);
@@ -1061,7 +1251,69 @@ impl SearchEngine {
             total_paths,
             shards: summaries,
             indexing: self.progress.snapshot(),
+            llm_sessions_total: self.llm_memory.session_count(),
+            llm_providers: self.llm_memory.provider_counts(),
         }
+    }
+}
+
+fn parse_inline_query_scope(
+    raw_query: &str,
+    default_scope: SearchScope,
+) -> (SearchScope, Option<LlmProvider>, &str) {
+    let leading = raw_query.trim_start();
+    if let Some(after_at) = leading.strip_prefix('@') {
+        let split_idx = after_at
+            .find(char::is_whitespace)
+            .unwrap_or(after_at.len());
+        let tag = after_at[..split_idx].to_ascii_lowercase();
+        let rest = after_at[split_idx..].trim_start();
+
+        return match tag.as_str() {
+            "chat" | "chats" | "llm" | "ai" => (SearchScope::Chats, None, rest),
+            "claude" | "anthropic" => (SearchScope::Chats, Some(LlmProvider::Claude), rest),
+            "codex" => (SearchScope::Chats, Some(LlmProvider::Codex), rest),
+            "gemini" | "antigravity" | "agy" => {
+                (SearchScope::Chats, Some(LlmProvider::Gemini), rest)
+            }
+            "chatgpt" | "gpt" | "openai" => {
+                (SearchScope::Chats, Some(LlmProvider::ChatGpt), rest)
+            }
+            "lmstudio" | "local" => (SearchScope::Chats, Some(LlmProvider::LmStudio), rest),
+            "file" | "files" => (SearchScope::Files, None, rest),
+            _ => (default_scope, None, raw_query),
+        };
+    }
+    (default_scope, None, raw_query)
+}
+
+fn llm_hit_to_ranked(h: LlmSearchHit, ctx: &QueryContext) -> RankedHit {
+    let mut score = h.rrf_score;
+    // Ambient workspace boost: if the AI conversation happened inside the user's active workspace, boost it!
+    if let (Some(chat_ws), Some(active_ws)) = (&h.workspace, &ctx.active_workspace_dir)
+        && !chat_ws.is_empty()
+        && !active_ws.is_empty()
+        && (chat_ws.starts_with(active_ws) || active_ws.starts_with(chat_ws))
+    {
+        score *= 1.25;
+    }
+
+    let provider_str = h.provider.as_str().to_string();
+    RankedHit {
+        doc_id: h.doc_id,
+        path: h.source_path.to_string_lossy().into_owned(),
+        filename: h.title,
+        rrf_score: score,
+        snippet: h.snippet,
+        match_indices: h.match_indices,
+        matched_layers: h.matched_layers,
+        is_dir: false,
+        volume_name: provider_str.clone(),
+        volume_online: true,
+        is_llm_chat: true,
+        llm_provider: Some(provider_str),
+        llm_session_id: Some(h.session_id),
+        workspace: h.workspace,
     }
 }
 

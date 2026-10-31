@@ -7,14 +7,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use fms_fs_indexer::ShardStorageMode;
 use fms_system1_predictor::QueryContext;
 use serde::{Deserialize, Serialize};
 
-use crate::{EngineStatus, IndexReport, SearchEngine, SearchResponse};
+use crate::{
+    EngineStatus, IndexReport, LlmSession, LlmSyncReport, SearchEngine, SearchResponse, SearchScope,
+};
 
-/// Default Unix Domain Socket path for `searchd` <-> macOS UI / CLI IPC.
+/// Default Unix Domain Socket path for `searchd` <-> macOS UI / CLI / MCP IPC.
 pub fn default_socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("FMS_SOCKET") {
         return PathBuf::from(custom);
@@ -44,6 +47,8 @@ pub enum IpcRequest {
         context: QueryContext,
         #[serde(default)]
         l0_only: bool,
+        #[serde(default)]
+        scope: SearchScope,
     },
     RecordSelection {
         query: String,
@@ -64,6 +69,14 @@ pub enum IpcRequest {
     RemoveShard {
         volume_uuid: String,
     },
+    SyncLlmChats,
+    SyncLlmChatsAsync,
+    ImportLlmExport {
+        path: PathBuf,
+    },
+    GetLlmConversation {
+        session_id: String,
+    },
     Status,
     Ping,
 }
@@ -73,6 +86,8 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     Search(SearchResponse),
     Indexed(IndexReport),
+    LlmSynced(LlmSyncReport),
+    LlmConversation { session: LlmSession },
     Status(EngineStatus),
     Ack { message: String },
     Error { message: String },
@@ -103,7 +118,7 @@ pub fn acquire_single_instance_lock(socket_path: &Path) -> io::Result<File> {
 }
 
 /// Runs the multi-client Unix Domain Socket IPC server (`searchd`), restricting socket permissions
-/// to `0600` (owner-only zero-trust access).
+/// to `0600` (owner-only zero-trust access) and keeping local LLM conversations synced in the background.
 pub fn serve_unix_socket(
     socket_path: &Path,
     engine: Arc<SearchEngine>,
@@ -118,6 +133,29 @@ pub fn serve_unix_socket(
 
     let listener = UnixListener::bind(socket_path)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+
+    if std::env::var("FMS_DISABLE_LLM_AUTOSYNC").is_err() {
+        let eng_bg = Arc::clone(&engine);
+        let stop_bg = Arc::clone(&shutdown);
+        let _ = thread::Builder::new()
+            .name("fms-llm-autosync".into())
+            .spawn(move || {
+                loop {
+                    if stop_bg.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Err(e) = eng_bg.sync_llm_chats() {
+                        tracing::warn!("Background LLM chat sync error: {e}");
+                    }
+                    for _ in 0..45 {
+                        if stop_bg.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            });
+    }
 
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::Relaxed) {
@@ -155,7 +193,14 @@ fn handle_client_stream(stream: UnixStream, engine: Arc<SearchEngine>) -> io::Re
                 limit,
                 context,
                 l0_only,
-            }) => IpcResponse::Search(engine.search(&query, limit.max(1), &context, l0_only)),
+                scope,
+            }) => IpcResponse::Search(engine.search_scoped(
+                &query,
+                limit.max(1),
+                &context,
+                l0_only,
+                scope,
+            )),
             Ok(IpcRequest::RecordSelection {
                 query,
                 selected_path,
@@ -208,6 +253,37 @@ fn handle_client_stream(stream: UnixStream, engine: Arc<SearchEngine>) -> io::Re
                     message: e.to_string(),
                 },
             },
+            Ok(IpcRequest::SyncLlmChats) => match engine.sync_llm_chats() {
+                Ok(rep) => IpcResponse::LlmSynced(rep),
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            Ok(IpcRequest::SyncLlmChatsAsync) => {
+                let engine_bg = Arc::clone(&engine);
+                thread::Builder::new()
+                    .name("fms-llm-sync-manual".into())
+                    .spawn(move || {
+                        let _ = engine_bg.sync_llm_chats();
+                    })?;
+                IpcResponse::Ack {
+                    message: "llm_sync_started".into(),
+                }
+            }
+            Ok(IpcRequest::ImportLlmExport { path }) => match engine.import_llm_export(&path) {
+                Ok(rep) => IpcResponse::LlmSynced(rep),
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            Ok(IpcRequest::GetLlmConversation { session_id }) => {
+                match engine.get_llm_session(&session_id) {
+                    Some(session) => IpcResponse::LlmConversation { session },
+                    None => IpcResponse::Error {
+                        message: format!("LLM session not found: {session_id}"),
+                    },
+                }
+            }
             Ok(IpcRequest::Status) => IpcResponse::Status(engine.status()),
             Ok(IpcRequest::Ping) => IpcResponse::Ack {
                 message: "pong".into(),

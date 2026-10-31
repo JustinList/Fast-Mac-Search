@@ -1,3 +1,5 @@
+mod mcp;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +12,7 @@ use fms_core_engine::ipc::{
     IpcRequest, IpcResponse, acquire_single_instance_lock, default_socket_path, send_ipc_request,
     serve_unix_socket,
 };
-use fms_core_engine::{EngineConfig, SearchEngine};
+use fms_core_engine::{EngineConfig, LlmSyncReport, SearchEngine, SearchScope};
 use fms_crypto_vfs::{
     DEFAULT_PAGE_SIZE, DecryptedPageCache, EncryptedRandomAccessFile, EncryptedStreamWriter,
     ShardKey, verify_zero_plaintext_on_disk,
@@ -55,11 +57,14 @@ enum Commands {
 
     /// Execute the 3-Tier System-1 + ARM NEON + Encrypted Tantivy + Semantic Vector search
     Search {
-        /// Search query (partial prefixes, fuzzy filenames, or conceptual multi-word queries)
+        /// Search query (partial prefixes, fuzzy filenames, @claude/@codex/@gemini tags, or concepts)
         query: String,
         /// Maximum number of ranked results
         #[arg(short = 'n', long, default_value_t = 12)]
         limit: usize,
+        /// Filter scope: all, files, or chats
+        #[arg(long, default_value = "all")]
+        scope: String,
         /// Active frontmost app bundle ID for System 1 Markov frecency context
         #[arg(long)]
         app: Option<String>,
@@ -70,6 +75,18 @@ enum Commands {
         #[arg(long)]
         l0_only: bool,
     },
+
+    /// Sync, import, search, and read encrypted cross-LLM conversations (Claude, Codex, Gemini, ChatGPT, LM Studio)
+    Llm {
+        #[command(subcommand)]
+        action: LlmCommands,
+    },
+
+    /// Run the built-in Model Context Protocol (MCP) stdio server for Claude Desktop, Claude Code, Codex, Cursor, & Antigravity
+    Mcp,
+
+    /// Automatically register `fast-mac-search` as an MCP server in Claude Desktop and print setup snippets for other AI tools
+    McpInstall,
 
     /// Record a user selection to train the System 1 Contextual Markov Frecency Graph
     Select {
@@ -108,6 +125,37 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum LlmCommands {
+    /// Incrementally discover and index all local Claude, Codex, Gemini/Antigravity, & LM Studio chats
+    Sync,
+
+    /// Import a ChatGPT or Claude Web `conversations.json` export into AES-256-GCM encrypted memory
+    Import {
+        /// Path to `conversations.json` export file
+        path: PathBuf,
+    },
+
+    /// Search encrypted cross-LLM conversations (leave query empty to list recent chats)
+    Search {
+        /// Search query (optional; omit to list most recent AI chats)
+        #[arg(default_value = "")]
+        query: String,
+        /// Optional provider filter: claude, codex, gemini, chatgpt, lmstudio
+        #[arg(short = 'p', long)]
+        provider: Option<String>,
+        /// Maximum number of conversations to return
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
+    },
+
+    /// Print the clean decrypted dialogue transcript of an indexed LLM session
+    Read {
+        /// Session ID (e.g. `claude:...`, `codex:...`, `gemini:...`, `chatgpt:...`)
+        session_id: String,
+    },
+}
+
 fn build_config(home: Option<PathBuf>) -> EngineConfig {
     let mut cfg = EngineConfig::default();
     if let Some(h) = home {
@@ -118,6 +166,7 @@ fn build_config(home: Option<PathBuf>) -> EngineConfig {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
@@ -150,10 +199,12 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             limit,
+            scope,
             app,
             cwd,
             l0_only,
         } => {
+            let parsed_scope = SearchScope::from_tag(&scope);
             let context = QueryContext {
                 active_app_bundle_id: app,
                 active_workspace_dir: cwd.or_else(|| {
@@ -173,52 +224,153 @@ fn main() -> Result<()> {
                         limit,
                         context: context.clone(),
                         l0_only,
+                        scope: parsed_scope,
                     },
                 ) {
                 r
             } else {
                 let engine = SearchEngine::open(build_config(cli.home))?;
-                engine.search(&query, limit, &context, l0_only)
+                engine.search_scoped(&query, limit, &context, l0_only, parsed_scope)
             };
 
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            } else {
-                println!(
-                    "⚡ {:.2} ms total (L0: {} µs | L1: {} µs | L2: {} µs) · intent={} · indexed={} paths",
-                    resp.total_elapsed_us as f64 / 1000.0,
-                    resp.stage1_l0_us,
-                    resp.stage2_l1_us,
-                    resp.stage3_l2_us,
-                    resp.intent,
-                    resp.total_indexed_paths
-                );
-                if let Some(ref ghost) = resp.ghost_prediction {
+            print_search_results(&resp, cli.json)?;
+        }
+
+        Commands::Llm { action } => match action {
+            LlmCommands::Sync => {
+                let rep = if sock_path.exists()
+                    && let Ok(IpcResponse::LlmSynced(r)) =
+                        send_ipc_request(&sock_path, &IpcRequest::SyncLlmChats)
+                {
+                    r
+                } else {
+                    let engine = SearchEngine::open(build_config(cli.home))?;
+                    engine.sync_llm_chats()?
+                };
+                print_llm_sync_report(&rep, cli.json)?;
+            }
+
+            LlmCommands::Import { path } => {
+                let abs = path.canonicalize().unwrap_or(path);
+                let rep = if sock_path.exists() {
+                    match send_ipc_request(&sock_path, &IpcRequest::ImportLlmExport { path: abs.clone() }) {
+                        Ok(IpcResponse::LlmSynced(r)) => r,
+                        Ok(IpcResponse::Error { message }) => anyhow::bail!("{message}"),
+                        _ => {
+                            let engine = SearchEngine::open(build_config(cli.home))?;
+                            engine.import_llm_export(&abs)?
+                        }
+                    }
+                } else {
+                    let engine = SearchEngine::open(build_config(cli.home))?;
+                    engine.import_llm_export(&abs)?
+                };
+                print_llm_sync_report(&rep, cli.json)?;
+            }
+
+            LlmCommands::Search {
+                query,
+                provider,
+                limit,
+            } => {
+                let effective_q = match provider {
+                    Some(p) if !p.trim().is_empty() => {
+                        format!("@{} {}", p.trim().trim_start_matches('@'), query)
+                    }
+                    _ => query,
+                };
+                let ctx = QueryContext::default();
+                let resp = if sock_path.exists()
+                    && let Ok(IpcResponse::Search(r)) = send_ipc_request(
+                        &sock_path,
+                        &IpcRequest::Query {
+                            query: effective_q.clone(),
+                            limit,
+                            context: ctx.clone(),
+                            l0_only: false,
+                            scope: SearchScope::Chats,
+                        },
+                    )
+                {
+                    r
+                } else {
+                    let engine = SearchEngine::open(build_config(cli.home))?;
+                    engine.search_scoped(&effective_q, limit, &ctx, false, SearchScope::Chats)
+                };
+                print_search_results(&resp, cli.json)?;
+            }
+
+            LlmCommands::Read { session_id } => {
+                let session = if sock_path.exists()
+                    && let Ok(IpcResponse::LlmConversation { session }) = send_ipc_request(
+                        &sock_path,
+                        &IpcRequest::GetLlmConversation {
+                            session_id: session_id.clone(),
+                        },
+                    )
+                {
+                    session
+                } else {
+                    let engine = SearchEngine::open(build_config(cli.home))?;
+                    engine
+                        .get_llm_session(&session_id)
+                        .ok_or_else(|| anyhow::anyhow!("LLM session not found: {session_id}"))?
+                };
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&session)?);
+                } else {
                     println!(
-                        "👻 Ghost autocomplete [Tab]: {}\x1b[90m{}\x1b[0m",
-                        resp.query, ghost.ghost_suffix
+                        "✦ [{}] {} ({})",
+                        session.provider.as_str(),
+                        session.title,
+                        session.session_id
                     );
-                }
-                for (idx, hit) in resp.hits.iter().enumerate() {
-                    let badge = if hit.volume_online {
-                        format!("[{}]", hit.volume_name)
-                    } else {
-                        format!("[OFFLINE - Connect {}]", hit.volume_name)
-                    };
-                    let layers = hit.matched_layers.join("+");
-                    println!(
-                        "{:>2}. {:<32} ({:.4} · {}) {} {}",
-                        idx + 1,
-                        hit.filename,
-                        hit.rrf_score,
-                        layers,
-                        badge,
-                        hit.path
-                    );
-                    if !hit.snippet.is_empty() {
-                        println!("      \x1b[90m{}\x1b[0m", hit.snippet);
+                    if let Some(ref ws) = session.workspace {
+                        println!("  Workspace : {ws}");
+                    }
+                    println!("  Source    : {}", session.source_path.display());
+                    println!("────────────────────────────────────────────────────────────");
+                    for (i, turn) in session.turns.iter().enumerate() {
+                        let role = if turn.role == "user" {
+                            "\x1b[1;36mUSER\x1b[0m"
+                        } else {
+                            "\x1b[1;33mASSISTANT\x1b[0m"
+                        };
+                        println!("\n[{role} #{}]\n{}", i + 1, turn.text);
                     }
                 }
+            }
+        },
+
+        Commands::Mcp => {
+            mcp::run_mcp_stdio_server(cli.home, sock_path)?;
+        }
+
+        Commands::McpInstall => {
+            let (fms_bin, claude_cfg) = mcp::install_mcp_into_claude_desktop()?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "installed": true,
+                        "fms_binary": fms_bin,
+                        "claude_desktop_config": claude_cfg,
+                    })
+                );
+            } else {
+                println!("✓ Installed `fast-mac-search` MCP server into Claude Desktop:");
+                println!("  Config : {}", claude_cfg.display());
+                println!("  Binary : {}", fms_bin.display());
+                println!("\nOptional 1-line setup for your other AI coding agents:");
+                println!(
+                    "  • Claude Code : claude mcp add fast-mac-search -- \"{}\" mcp",
+                    fms_bin.display()
+                );
+                println!(
+                    "  • OpenAI Codex: codex mcp add fast-mac-search -- \"{}\" mcp",
+                    fms_bin.display()
+                );
             }
         }
 
@@ -318,6 +470,20 @@ fn main() -> Result<()> {
                         s.key_backend
                     );
                 }
+                let prov_summary = if status.llm_providers.is_empty() {
+                    "run `fms llm sync` to index local chats".to_string()
+                } else {
+                    status
+                        .llm_providers
+                        .iter()
+                        .map(|p| format!("{}: {}", p.provider, p.count))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!(
+                    "  AI Memory       : {} encrypted sessions ({})",
+                    status.llm_sessions_total, prov_summary
+                );
             }
         }
 
@@ -334,6 +500,85 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn print_search_results(resp: &fms_core_engine::SearchResponse, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(resp)?);
+    } else {
+        println!(
+            "⚡ {:.2} ms total (L0: {} µs | L1: {} µs | L2: {} µs) · intent={} · indexed={} items",
+            resp.total_elapsed_us as f64 / 1000.0,
+            resp.stage1_l0_us,
+            resp.stage2_l1_us,
+            resp.stage3_l2_us,
+            resp.intent,
+            resp.total_indexed_paths
+        );
+        if let Some(ref ghost) = resp.ghost_prediction {
+            println!(
+                "👻 Ghost autocomplete [Tab]: {}\x1b[90m{}\x1b[0m",
+                resp.query, ghost.ghost_suffix
+            );
+        }
+        for (idx, hit) in resp.hits.iter().enumerate() {
+            let badge = if hit.is_llm_chat {
+                format!(
+                    "[✦ {}]",
+                    hit.llm_provider.as_deref().unwrap_or(&hit.volume_name)
+                )
+            } else if hit.volume_online {
+                format!("[{}]", hit.volume_name)
+            } else {
+                format!("[OFFLINE - Connect {}]", hit.volume_name)
+            };
+            let layers = hit.matched_layers.join("+");
+            let loc = if hit.is_llm_chat {
+                hit.llm_session_id.as_deref().unwrap_or(&hit.path)
+            } else {
+                &hit.path
+            };
+            println!(
+                "{:>2}. {:<36} ({:.4} · {}) {} {}",
+                idx + 1,
+                hit.filename,
+                hit.rrf_score,
+                layers,
+                badge,
+                loc
+            );
+            if !hit.snippet.is_empty() {
+                println!("      \x1b[90m{}\x1b[0m", hit.snippet);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_llm_sync_report(rep: &LlmSyncReport, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(rep)?);
+    } else {
+        let breakdown = rep
+            .providers
+            .iter()
+            .map(|p| format!("{}: {}", p.provider, p.count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "✦ Encrypted Cross-LLM Memory Synced in {:.1} ms",
+            rep.elapsed_ms
+        );
+        println!(
+            "  Transcripts : {} discovered ({} parsed, {} unchanged cached)",
+            rep.files_discovered, rep.files_parsed, rep.files_cached
+        );
+        println!(
+            "  Total Chats : {} encrypted sessions ({})",
+            rep.sessions_total, breakdown
+        );
+    }
     Ok(())
 }
 

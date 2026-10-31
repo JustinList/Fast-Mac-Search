@@ -14,6 +14,7 @@ fms-fs-indexer.workspace = true
 fms-l0-arena.workspace = true
 fms-l1-lexical.workspace = true
 fms-l2-semantic.workspace = true
+fms-llm-memory.workspace = true
 fms-system1-predictor.workspace = true
 libc.workspace = true
 parking_lot.workspace = true

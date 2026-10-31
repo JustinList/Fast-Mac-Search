@@ -29,6 +29,65 @@ public struct RankedHitPayload: Codable, Sendable {
     public let is_dir: Bool
     public let volume_name: String
     public let volume_online: Bool
+    public let is_llm_chat: Bool
+    public let llm_provider: String?
+    public let llm_session_id: String?
+    public let workspace: String?
+
+    enum CodingKeys: String, CodingKey {
+        case doc_id, path, filename, rrf_score, snippet, match_indices, matched_layers
+        case is_dir, volume_name, volume_online
+        case is_llm_chat, llm_provider, llm_session_id, workspace
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.doc_id = try c.decode(UInt64.self, forKey: .doc_id)
+        self.path = try c.decode(String.self, forKey: .path)
+        self.filename = try c.decode(String.self, forKey: .filename)
+        self.rrf_score = try c.decode(Float.self, forKey: .rrf_score)
+        self.snippet = try c.decode(String.self, forKey: .snippet)
+        self.match_indices = (try? c.decode([UInt32].self, forKey: .match_indices)) ?? []
+        self.matched_layers = (try? c.decode([String].self, forKey: .matched_layers)) ?? []
+        self.is_dir = (try? c.decode(Bool.self, forKey: .is_dir)) ?? false
+        self.volume_name = (try? c.decode(String.self, forKey: .volume_name)) ?? ""
+        self.volume_online = (try? c.decode(Bool.self, forKey: .volume_online)) ?? true
+        self.is_llm_chat = (try? c.decode(Bool.self, forKey: .is_llm_chat)) ?? false
+        self.llm_provider = try? c.decodeIfPresent(String.self, forKey: .llm_provider)
+        self.llm_session_id = try? c.decodeIfPresent(String.self, forKey: .llm_session_id)
+        self.workspace = try? c.decodeIfPresent(String.self, forKey: .workspace)
+    }
+}
+
+public struct LlmTurnPayload: Codable, Sendable {
+    public let role: String
+    public let text: String
+    public let timestamp: String?
+}
+
+public struct LlmSessionPayload: Codable, Sendable {
+    public let session_id: String
+    public let provider: String
+    public let title: String
+    public let workspace: String?
+    public let model: String?
+    public let updated_unix_secs: Int64
+    public let source_path: String
+    public let turns: [LlmTurnPayload]
+}
+
+public struct LlmProviderCountPayload: Codable, Sendable {
+    public let provider: String
+    public let count: Int
+}
+
+public struct LlmSyncReportPayload: Codable, Sendable {
+    public let files_discovered: Int
+    public let files_parsed: Int
+    public let files_cached: Int
+    public let sessions_total: Int
+    public let providers: [LlmProviderCountPayload]
+    public let elapsed_ms: Double
 }
 
 public struct SearchResponsePayload: Codable, Sendable {
@@ -96,6 +155,8 @@ public struct EngineStatusPayload: Codable, Sendable {
     public let total_paths: Int
     public let shards: [ShardStatusPayload]
     public let indexing: IndexingProgressPayload
+    public let llm_sessions_total: Int
+    public let llm_providers: [LlmProviderCountPayload]
 }
 
 private struct QueryEnvelope: Encodable {
@@ -104,6 +165,7 @@ private struct QueryEnvelope: Encodable {
     let limit: Int
     let context: QueryContextPayload
     let l0_only: Bool
+    let scope: String
 }
 
 private struct RecordSelectionEnvelope: Encodable {
@@ -122,6 +184,16 @@ private struct IndexRootEnvelope: Encodable {
 private struct RemoveShardEnvelope: Encodable {
     let op = "remove_shard"
     let volume_uuid: String
+}
+
+private struct ImportLlmEnvelope: Encodable {
+    let op = "import_llm_export"
+    let path: String
+}
+
+private struct GetLlmConversationEnvelope: Encodable {
+    let op = "get_llm_conversation"
+    let session_id: String
 }
 
 private struct SimpleOpEnvelope: Encodable {
@@ -148,6 +220,17 @@ private struct RawIpcResponse: Decodable {
     let total_paths: Int?
     let shards: [ShardStatusPayload]?
     let indexing: IndexingProgressPayload?
+    let llm_sessions_total: Int?
+    let llm_providers: [LlmProviderCountPayload]?
+
+    // LLM conversation & sync fields
+    let session: LlmSessionPayload?
+    let files_discovered: Int?
+    let files_parsed: Int?
+    let files_cached: Int?
+    let sessions_total: Int?
+    let providers: [LlmProviderCountPayload]?
+    let elapsed_ms: Double?
 
     let message: String?
 }
@@ -184,7 +267,9 @@ public final class SearchdIPCClient: Sendable {
                 shard_count: decoded.shard_count ?? 0,
                 total_paths: decoded.total_paths ?? 0,
                 shards: decoded.shards ?? [],
-                indexing: decoded.indexing ?? IndexingProgressPayload()
+                indexing: decoded.indexing ?? IndexingProgressPayload(),
+                llm_sessions_total: decoded.llm_sessions_total ?? 0,
+                llm_providers: decoded.llm_providers ?? []
             )
         }
         throw NSError(
@@ -211,13 +296,63 @@ public final class SearchdIPCClient: Sendable {
         }
     }
 
+    public func syncLlmChatsAsync() {
+        let client = self
+        DispatchQueue.global(qos: .utility).async {
+            let req = SimpleOpEnvelope(op: "sync_llm_chats_async")
+            _ = try? client.sendLine(encodable: req, timeoutSeconds: 5)
+        }
+    }
+
+    public func importLlmExport(path: String) throws -> LlmSyncReportPayload {
+        let req = ImportLlmEnvelope(path: path)
+        let data = try sendLine(encodable: req, timeoutSeconds: 30)
+        let decoded = try JSONDecoder().decode(RawIpcResponse.self, from: data)
+        if decoded.type == "llm_synced" {
+            return LlmSyncReportPayload(
+                files_discovered: decoded.files_discovered ?? 1,
+                files_parsed: decoded.files_parsed ?? 0,
+                files_cached: decoded.files_cached ?? 0,
+                sessions_total: decoded.sessions_total ?? 0,
+                providers: decoded.providers ?? [],
+                elapsed_ms: decoded.elapsed_ms ?? 0
+            )
+        }
+        throw NSError(
+            domain: "FastMacSearchIPC",
+            code: 6,
+            userInfo: [NSLocalizedDescriptionKey: decoded.message ?? "Failed to import LLM export"]
+        )
+    }
+
+    public func getLlmConversation(sessionId: String) throws -> LlmSessionPayload {
+        let req = GetLlmConversationEnvelope(session_id: sessionId)
+        let data = try sendLine(encodable: req, timeoutSeconds: 5)
+        let decoded = try JSONDecoder().decode(RawIpcResponse.self, from: data)
+        if decoded.type == "llm_conversation", let session = decoded.session {
+            return session
+        }
+        throw NSError(
+            domain: "FastMacSearchIPC",
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: decoded.message ?? "Conversation not found"]
+        )
+    }
+
     public func query(
         _ text: String,
         limit: Int = 10,
+        scope: String = "all",
         context: QueryContextPayload,
         l0Only: Bool = false
     ) throws -> SearchResponsePayload {
-        let req = QueryEnvelope(query: text, limit: limit, context: context, l0_only: l0Only)
+        let req = QueryEnvelope(
+            query: text,
+            limit: limit,
+            context: context,
+            l0_only: l0Only,
+            scope: scope
+        )
         let data = try sendLine(encodable: req)
         let decoded = try JSONDecoder().decode(RawIpcResponse.self, from: data)
         if decoded.type == "search",

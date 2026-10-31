@@ -7,12 +7,13 @@ members = [
     "crates/l1-lexical",
     "crates/l2-semantic",
     "crates/system1-predictor",
+    "crates/llm-memory",
     "crates/core-engine",
     "clients/cli",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 authors = ["Fast Mac Search Contributors"]
@@ -27,6 +28,7 @@ fms-l0-arena = { path = "crates/l0-arena" }
 fms-l1-lexical = { path = "crates/l1-lexical" }
 fms-l2-semantic = { path = "crates/l2-semantic" }
 fms-system1-predictor = { path = "crates/system1-predictor" }
+fms-llm-memory = { path = "crates/llm-memory" }
 fms-core-engine = { path = "crates/core-engine" }
 
 # Cryptography & Zero-Trust Storage

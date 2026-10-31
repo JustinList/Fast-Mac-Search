@@ -561,7 +561,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fms-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -569,6 +569,7 @@ dependencies = [
  "fms-crypto-vfs",
  "fms-fs-indexer",
  "fms-l0-arena",
+ "fms-llm-memory",
  "fms-system1-predictor",
  "serde_json",
  "tracing",
@@ -577,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "fms-core-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -587,6 +588,7 @@ dependencies = [
  "fms-l0-arena",
  "fms-l1-lexical",
  "fms-l2-semantic",
+ "fms-llm-memory",
  "fms-system1-predictor",
  "libc",
  "parking_lot",
@@ -600,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "fms-crypto-vfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -621,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "fms-fs-indexer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "crossbeam-channel",
@@ -637,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "fms-l0-arena"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "fms-crypto-vfs",
@@ -653,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "fms-l1-lexical"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fms-crypto-vfs",
  "parking_lot",
@@ -666,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "fms-l2-semantic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "blake3",
@@ -680,8 +682,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fms-llm-memory"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "blake3",
+ "fms-crypto-vfs",
+ "fms-l0-arena",
+ "fms-l1-lexical",
+ "fms-l2-semantic",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "fms-system1-predictor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "fms-crypto-vfs",

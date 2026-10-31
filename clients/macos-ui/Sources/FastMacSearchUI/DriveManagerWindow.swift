@@ -112,8 +112,9 @@ public final class DriveManagerWindowController: NSWindowController, NSTableView
                 statusBanner.stringValue = "⚡ \(st.indexing.phase) on \(st.indexing.active_target) — \(scanned) files scanned…"
             } else {
                 let total = NumberFormatter.localizedString(from: NSNumber(value: st.total_paths), number: .decimal)
+                let chats = NumberFormatter.localizedString(from: NSNumber(value: st.llm_sessions_total), number: .decimal)
                 statusBanner.textColor = .secondaryLabelColor
-                statusBanner.stringValue = "✓ Zero-Trust AES-256-GCM Active · \(total) paths indexed across \(st.shard_count) drive shard(s)"
+                statusBanner.stringValue = "✓ Zero-Trust AES-256-GCM Active · \(total) paths (\(st.shard_count) drive\(st.shard_count == 1 ? "" : "s")) + \(chats) AI chats"
             }
         }
         tableView.reloadData()

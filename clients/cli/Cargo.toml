@@ -20,6 +20,7 @@ fms-core-engine.workspace = true
 fms-crypto-vfs.workspace = true
 fms-fs-indexer.workspace = true
 fms-l0-arena.workspace = true
+fms-llm-memory.workspace = true
 fms-system1-predictor.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

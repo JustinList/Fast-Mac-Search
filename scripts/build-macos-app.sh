@@ -5,8 +5,9 @@ ROOT_DIR="${0:A:h:h}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_NAME="Fast Mac Search"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+VERSION="0.2.0"
 DMG_STAGING="$DIST_DIR/.dmg-staging"
-DMG_PATH="$DIST_DIR/Fast-Mac-Search-0.1.0-arm64.dmg"
+DMG_PATH="$DIST_DIR/Fast-Mac-Search-${VERSION}-arm64.dmg"
 
 echo "==> [1/5] Building optimized Rust engine binaries (searchd + fms)…"
 cd "$ROOT_DIR"
@@ -146,9 +147,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

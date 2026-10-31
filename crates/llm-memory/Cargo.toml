@@ -1,0 +1,22 @@
+[package]
+name = "fms-llm-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Streaming cross-LLM conversation parser (Claude, Codex, Gemini/Antigravity, ChatGPT, LM Studio) and AES-256-GCM encrypted conversation memory index"
+
+[dependencies]
+ahash.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+fms-crypto-vfs.workspace = true
+fms-l0-arena.workspace = true
+fms-l1-lexical.workspace = true
+fms-l2-semantic.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
