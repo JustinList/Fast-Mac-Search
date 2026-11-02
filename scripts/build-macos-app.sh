@@ -5,7 +5,7 @@ ROOT_DIR="${0:A:h:h}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_NAME="Fast Mac Search"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-VERSION="0.2.0"
+VERSION="0.3.0"
 DMG_STAGING="$DIST_DIR/.dmg-staging"
 DMG_PATH="$DIST_DIR/Fast-Mac-Search-${VERSION}-arm64.dmg"
 

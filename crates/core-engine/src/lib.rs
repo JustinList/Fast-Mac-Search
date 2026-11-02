@@ -1,6 +1,9 @@
 //! `fms-core-engine` — 3-Tier Parallel Real-Time Search & Encrypted Multi-Volume Shard Orchestrator.
 
+pub mod calc;
 pub mod ipc;
+
+pub use calc::{CalcAnswer, eval_math_query};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,6 +134,8 @@ pub struct SearchResponse {
     pub generation: u64,
     pub intent: String,
     pub ghost_prediction: Option<GhostPrediction>,
+    #[serde(default)]
+    pub calc_answer: Option<CalcAnswer>,
     pub stage1_l0_us: u64,
     pub stage2_l1_us: u64,
     pub stage3_l2_us: u64,
@@ -871,6 +876,11 @@ impl SearchEngine {
             parse_inline_query_scope(raw_query, requested_scope);
         let trimmed = stripped_query.trim();
         let weights = classify_query_intent(trimmed);
+        let calc_answer = if scope == SearchScope::All && provider_filter.is_none() {
+            eval_math_query(trimmed)
+        } else {
+            None
+        };
 
         let shards: Vec<Arc<VolumeShard>> = self.shards.read().values().cloned().collect();
         let file_paths_count: usize = shards
@@ -880,12 +890,17 @@ impl SearchEngine {
         let llm_sessions_count = self.llm_memory.session_count();
         let total_indexed_paths = file_paths_count + llm_sessions_count;
 
-        if limit == 0 {
+        if limit == 0 || calc_answer.is_some() {
             return SearchResponse {
                 query: raw_query.to_string(),
                 generation: my_gen,
-                intent: weights.intent_label.to_string(),
+                intent: if calc_answer.is_some() {
+                    "calculator".to_string()
+                } else {
+                    weights.intent_label.to_string()
+                },
                 ghost_prediction: None,
+                calc_answer,
                 stage1_l0_us: 0,
                 stage2_l1_us: 0,
                 stage3_l2_us: 0,
@@ -919,6 +934,7 @@ impl SearchEngine {
                 generation: my_gen,
                 intent,
                 ghost_prediction: None,
+                calc_answer: None,
                 stage1_l0_us: llm_out.l0_us,
                 stage2_l1_us: llm_out.l1_us,
                 stage3_l2_us: llm_out.l2_us,
@@ -936,6 +952,7 @@ impl SearchEngine {
                 generation: my_gen,
                 intent: weights.intent_label.to_string(),
                 ghost_prediction: None,
+                calc_answer,
                 stage1_l0_us: 0,
                 stage2_l1_us: 0,
                 stage3_l2_us: 0,
@@ -1191,8 +1208,13 @@ impl SearchEngine {
         SearchResponse {
             query: raw_query.to_string(),
             generation: my_gen,
-            intent: weights.intent_label.to_string(),
+            intent: if calc_answer.is_some() {
+                "calculator".to_string()
+            } else {
+                weights.intent_label.to_string()
+            },
             ghost_prediction,
+            calc_answer,
             stage1_l0_us,
             stage2_l1_us,
             stage3_l2_us,

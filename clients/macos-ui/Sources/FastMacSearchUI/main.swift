@@ -321,6 +321,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        // Opt-In Privacy-Guarded Web Suggestions toggle (OFF by default for 100% local zero-trust)
+        let webSugItem = NSMenuItem(
+            title: "Web Suggestions (Privacy-Filtered)",
+            action: #selector(toggleWebSuggestions),
+            keyEquivalent: ""
+        )
+        webSugItem.target = self
+        webSugItem.state = WebSuggestClient.isEnabled ? .on : .off
+        webSugItem.toolTip = "Off by default. When enabled, fetches cookie-free Google completions while blocking paths, filenames with dots, URLs, and @tags."
+        menu.addItem(webSugItem)
+
+        // Global Hotkey Picker Submenu (Nanolight-style)
+        let shortcutParent = NSMenuItem(title: "Search Shortcut (\(currentHotKeyDisplaySymbol))", action: nil, keyEquivalent: "")
+        let shortcutMenu = NSMenu()
+        let currentCode = UserDefaults.standard.string(forKey: Self.hotKeyDefaultsKey) ?? "opt_space"
+        let presets: [(id: String, label: String)] = [
+            ("opt_space", "⌥Space (Option + Space)"),
+            ("ctrl_space", "⌃Space (Control + Space)"),
+            ("opt_cmd_space", "⌥⌘Space (Option + Command + Space)"),
+            ("cmd_space", "⌘Space (Command + Space — free Spotlight first)")
+        ]
+        for preset in presets {
+            let sub = NSMenuItem(title: preset.label, action: #selector(selectHotKeyPreset(_:)), keyEquivalent: "")
+            sub.target = self
+            sub.representedObject = preset.id
+            sub.state = (preset.id == currentCode) ? .on : .off
+            shortcutMenu.addItem(sub)
+        }
+        shortcutParent.submenu = shortcutMenu
+        menu.addItem(shortcutParent)
+
         // Native macOS Launch at Login toggle
         let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         loginItem.target = self
@@ -469,6 +500,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         driveManager.presentAndRefresh(with: latestStatus)
     }
 
+    private static let hotKeyDefaultsKey = "FMSGlobalHotKeyPreset"
+    private var hotKeyHandlerInstalled = false
+
+    private var currentHotKeyDisplaySymbol: String {
+        switch UserDefaults.standard.string(forKey: Self.hotKeyDefaultsKey) ?? "opt_space" {
+        case "ctrl_space": return "⌃Space"
+        case "opt_cmd_space": return "⌥⌘Space"
+        case "cmd_space": return "⌘Space"
+        default: return "⌥Space"
+        }
+    }
+
+    @objc private func toggleWebSuggestions() {
+        WebSuggestClient.isEnabled.toggle()
+        if panel.isVisible {
+            overlayController.refreshAfterPreferencesChange()
+        }
+    }
+
+    @objc private func selectHotKeyPreset(_ sender: NSMenuItem) {
+        guard let presetId = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(presetId, forKey: Self.hotKeyDefaultsKey)
+        registerSelectedHotKey()
+    }
+
     @objc private func toggleLaunchAtLogin() {
         do {
             if SMAppService.mainApp.status == .enabled {
@@ -510,38 +566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setupEventMonitors() {
-        // 1. Local key monitor for ⌘1/⌘2/⌘3 scope switching, ⌘Y preview/reader, & ⌘, Drives Manager
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return event }
-            if event.modifierFlags.contains(.command) {
-                let ch = event.charactersIgnoringModifiers?.lowercased()
-                if self.panel.isVisible {
-                    if ch == "1" {
-                        self.overlayController.selectScope(index: 0)
-                        return nil
-                    }
-                    if ch == "2" {
-                        self.overlayController.selectScope(index: 1)
-                        return nil
-                    }
-                    if ch == "3" {
-                        self.overlayController.selectScope(index: 2)
-                        return nil
-                    }
-                    if ch == "y" {
-                        self.overlayController.toggleQuickLook()
-                        return nil
-                    }
-                }
-                if ch == "," {
-                    self.openDriveManager()
-                    return nil
-                }
-            }
-            return event
-        }
-
-        // 2. Global mouse-down monitor: clicking ANYWHERE outside the Search Bar immediately dismisses it!
+        // Global mouse-down monitor: clicking ANYWHERE outside the Search Bar immediately dismisses it!
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self, self.panel.isVisible else { return }
@@ -568,32 +593,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func registerGlobalOptionSpaceHotKey() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        registerSelectedHotKey()
+    }
 
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { (_, _, userData) -> OSStatus in
-                guard let userData = userData else { return noErr }
-                let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in
-                    delegate.toggleOverlay()
-                }
-                return noErr
-            },
-            1,
-            &eventType,
-            selfPtr,
-            nil
-        )
+    private func registerSelectedHotKey() {
+        if !hotKeyHandlerInstalled {
+            hotKeyHandlerInstalled = true
+            var eventType = EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)
+            )
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                { (_, _, userData) -> OSStatus in
+                    guard let userData = userData else { return noErr }
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                    Task { @MainActor in
+                        delegate.toggleOverlay()
+                    }
+                    return noErr
+                },
+                1,
+                &eventType,
+                selfPtr,
+                nil
+            )
+        }
+
+        if let existing = hotKeyRef {
+            UnregisterEventHotKey(existing)
+            hotKeyRef = nil
+        }
+
+        let modifiers: UInt32
+        switch UserDefaults.standard.string(forKey: Self.hotKeyDefaultsKey) ?? "opt_space" {
+        case "ctrl_space":
+            modifiers = UInt32(controlKey)
+        case "opt_cmd_space":
+            modifiers = UInt32(optionKey | cmdKey)
+        case "cmd_space":
+            modifiers = UInt32(cmdKey)
+        default:
+            modifiers = UInt32(optionKey)
+        }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x464D_5331), id: 1) // 'FMS1'
         RegisterEventHotKey(
             UInt32(kVK_Space),
-            UInt32(optionKey),
+            modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,

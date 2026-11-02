@@ -90,11 +90,26 @@ public struct LlmSyncReportPayload: Codable, Sendable {
     public let elapsed_ms: Double
 }
 
+public struct CalcAnswerPayload: Codable, Sendable, Equatable {
+    public let expression: String
+    public let formatted: String
+    public let raw_value: Double
+    public let hex: String?
+
+    public init(expression: String, formatted: String, raw_value: Double, hex: String?) {
+        self.expression = expression
+        self.formatted = formatted
+        self.raw_value = raw_value
+        self.hex = hex
+    }
+}
+
 public struct SearchResponsePayload: Codable, Sendable {
     public let query: String
     public let generation: UInt64
     public let intent: String
     public let ghost_prediction: GhostPredictionPayload?
+    public let calc_answer: CalcAnswerPayload?
     public let stage1_l0_us: UInt64
     public let stage2_l1_us: UInt64
     public let stage3_l2_us: UInt64
@@ -206,6 +221,7 @@ private struct RawIpcResponse: Decodable {
     let generation: UInt64?
     let intent: String?
     let ghost_prediction: GhostPredictionPayload?
+    let calc_answer: CalcAnswerPayload?
     let stage1_l0_us: UInt64?
     let stage2_l1_us: UInt64?
     let stage3_l2_us: UInt64?
@@ -366,6 +382,7 @@ public final class SearchdIPCClient: Sendable {
                 generation: gen,
                 intent: intent,
                 ghost_prediction: decoded.ghost_prediction,
+                calc_answer: decoded.calc_answer,
                 stage1_l0_us: decoded.stage1_l0_us ?? 0,
                 stage2_l1_us: decoded.stage2_l1_us ?? 0,
                 stage3_l2_us: decoded.stage3_l2_us ?? 0,

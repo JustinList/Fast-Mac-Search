@@ -17,7 +17,8 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
                 .linkedFramework("Quartz"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("WebKit")
             ]
         )
     ]

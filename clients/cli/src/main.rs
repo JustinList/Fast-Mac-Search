@@ -516,6 +516,17 @@ fn print_search_results(resp: &fms_core_engine::SearchResponse, as_json: bool) -
             resp.intent,
             resp.total_indexed_paths
         );
+        if let Some(ref calc) = resp.calc_answer {
+            let hex_part = calc
+                .hex
+                .as_deref()
+                .map(|h| format!(" ({h})"))
+                .unwrap_or_default();
+            println!(
+                "🧮 Calculator        : {} = \x1b[1m{}\x1b[0m{}",
+                calc.expression, calc.formatted, hex_part
+            );
+        }
         if let Some(ref ghost) = resp.ghost_prediction {
             println!(
                 "👻 Ghost autocomplete [Tab]: {}\x1b[90m{}\x1b[0m",
