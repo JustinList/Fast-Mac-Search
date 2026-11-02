@@ -14,7 +14,7 @@
 ## Highlights
 
 - **Sub-Millisecond Search-As-You-Type:** Splits search into a **3-Tier Parallel Keystroke Pipeline** where L0 fuzzy path hits and Ghost-Text predictions render in **< 0.5 ms** across 1,000,000+ paths.
-- **Nanolight App Launcher & Live Calculator (`v0.3.0`):**
+- **App Launcher & Live Calculator (`v0.3.0` — with thanks to [Nanolight](https://github.com/justrach/nanolight)):**
   - **First-Class macOS App Launcher:** Finds apps by prefix, word boundaries, **initials** (`ss` → *System Settings*, `vsc` → *Visual Studio Code*), or **typos** (`chorme` → *Chrome*, `calandar` → *Calendar*), ranks frequently opened apps at the top (and shows your most-opened apps on an empty bar), highlights matched letters in bold, and completes inline via `Tab` or `→`.
   - **Instant Live Calculator:** Evaluates `+ - * / % ^`, `× ÷`, parentheses, `pi`, `e`, `sqrt`, `sin`, `cos`, `tan`, `ln`, `log`, and `abs` as you type (`2^10 * 3` → **`3,072`** + **`0xC00`** hex); `Return` copies the answer and `⌘Return` copies hex.
   - **Sectioned Liquid Glass Panel:** Smooth sliding selection pill, dynamic `Return` action footer, `⌥1`–`⌥9` quick-run rows, `⌃N`/`⌃P` navigation, hotkey switcher (`⌥Space` / `⌃Space` / `⌥⌘Space` / `⌘Space`), and **opt-in** privacy-filtered Web Suggestions + in-panel `WKWebView` preview (strictly **off by default** for 100% local zero-trust).
@@ -168,10 +168,14 @@ See [SECURITY.md](SECURITY.md) for full cryptographic details:
 
 ---
 
-## Contributing, Acknowledgments & License
+## Acknowledgments
+
+- **With thanks to [Nanolight](https://github.com/justrach/nanolight)** by [Rach Pradhan (`@justrach`)](https://github.com/justrach) (`MIT` License) — `v0.3.0` ports Nanolight's 7-tier macOS app launcher (word initials & Damerau-Levenshtein typo tolerance), live inline calculator, and sectioned Liquid Glass launcher UX natively into Fast Mac Search's Rust + Swift 6 zero-trust engine. Full MIT copyright & permission notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+---
+
+## Contributing & License
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-App launcher UX, multi-tier initials/typo matching, and inline math calculator inspired in part by [justrach/nanolight](https://github.com/justrach/nanolight) (MIT) — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Licensed under the **GNU General Public License v3.0 (GPL-3.0)** — see [LICENSE](LICENSE) for full details.
