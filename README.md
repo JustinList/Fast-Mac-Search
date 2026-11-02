@@ -14,14 +14,14 @@
 ## Highlights
 
 - **Sub-Millisecond Search-As-You-Type:** Splits search into a **3-Tier Parallel Keystroke Pipeline** where L0 fuzzy path hits and Ghost-Text predictions render in **< 0.5 ms** across 1,000,000+ paths.
-- **App Launcher & Live Calculator (`v0.3.0` — with thanks to [Nanolight](https://github.com/justrach/nanolight)):**
+- **App Launcher & Live Calculator (`v0.3.1` — with thanks to [Nanolight](https://github.com/justrach/nanolight)):**
   - **First-Class macOS App Launcher:** Finds apps by prefix, word boundaries, **initials** (`ss` → *System Settings*, `vsc` → *Visual Studio Code*), or **typos** (`chorme` → *Chrome*, `calandar` → *Calendar*), ranks frequently opened apps at the top (and shows your most-opened apps on an empty bar), highlights matched letters in bold, and completes inline via `Tab` or `→`.
-  - **Instant Live Calculator:** Evaluates `+ - * / % ^`, `× ÷`, parentheses, `pi`, `e`, `sqrt`, `sin`, `cos`, `tan`, `ln`, `log`, and `abs` as you type (`2^10 * 3` → **`3,072`** + **`0xC00`** hex); `Return` copies the answer and `⌘Return` copies hex.
-  - **Sectioned Liquid Glass Panel:** Smooth sliding selection pill, dynamic `Return` action footer, `⌥1`–`⌥9` quick-run rows, `⌃N`/`⌃P` navigation, hotkey switcher (`⌥Space` / `⌃Space` / `⌥⌘Space` / `⌘Space`), and **opt-in** privacy-filtered Web Suggestions + in-panel `WKWebView` preview (strictly **off by default** for 100% local zero-trust).
+  - **Instant Live Calculator:** Evaluates `+ - * / % ^`, `× ÷`, parentheses, `pi`, `e`, `sqrt`, `sin`, `cos`, `tan`, `ln`, `log`, and `abs` as you type (`2^10 * 3` → **`3,072`** + **`0xC00`** hex) in a two-column hero card; `Return` copies the answer and `⌘Return` copies hex.
+  - **Nanolight Liquid Glass Panel:** Distraction-free `680pt` Liquid Glass overlay, smooth sliding selection pill, dynamic `Return`/`esc` keycap action footer, `⌘1`–`⌘9` quick-run rows, `⌃N`/`⌃P` navigation, hotkey switcher (`⌥Space` / `⌃Space` / `⌥⌘Space` / `⌘Space`), and **opt-in** privacy-filtered Web Suggestions + in-panel `WKWebView` preview (strictly **off by default** for 100% local zero-trust).
 - **Cross-LLM Encrypted Memory (`v0.2.0+`):**
   - Automatically discovers and incrementally indexes local transcripts from **Claude Code** (`~/.claude/projects`), **Claude Desktop** (`~/Library/Application Support/Claude`), **OpenAI Codex** (`~/.codex/sessions`), **Gemini / Antigravity** (`~/.gemini/antigravity/brain`), and **LM Studio** (`~/.lmstudio/conversations`).
   - **1-Click ChatGPT & Claude Web Importer:** Parse `conversations.json` exports directly into AES-256-GCM encrypted memory—then safely delete the plaintext export file!
-  - **Native Conversation Reader Window:** Filter by **`All | Files | AI`** (`⌘1` / `⌘2` / `⌘3`) or type `@claude`, `@codex`, `@gemini`, or `@chatgpt` in `⌥Space` and press `Return` to read highlighted transcripts, copy full Markdown threads, or copy CLI `--resume` commands.
+  - **Native Conversation Reader Window:** Filter by **`All | Files | AI`** (`⌃1` / `⌃2` / `⌃3` or clickable footer pills) or type `@claude`, `@codex`, `@gemini`, or `@chatgpt` in `⌥Space` and press `Return` to read highlighted transcripts, copy full Markdown threads, or copy CLI `--resume` commands.
 - **Built-in Model Context Protocol (`fms mcp`) Server:** Give Claude Desktop, Claude Code, Codex, Cursor, and Antigravity `< 2 ms` tool access (`search_all`, `search_llm_chats`, `get_llm_conversation`, `search_status`) across all your drives and prior AI sessions!
 - **External Drive First-Class Citizen:** Never litters external drives with `.Spotlight-V100` folders.
   - **Host-Cached Mode (Default):** Stores encrypted shards per hardware Volume UUID on your internal NVMe—search external SSDs even while unplugged (`OFFLINE · Connect <Drive>`).
@@ -34,7 +34,7 @@
 
 ### Option A: Download Prebuilt `.dmg` (GitHub Releases)
 
-1. Download **`Fast-Mac-Search-0.3.0-arm64.dmg`** from the [**Releases**](../../releases) page.
+1. Download **`Fast-Mac-Search-0.3.1-arm64.dmg`** from the [**Releases**](../../releases) page.
 2. Open the `.dmg` and drag **Fast Mac Search.app** into **Applications**.
 3. *(First launch on macOS Gatekeeper for ad-hoc signed OSS builds)* Clear the browser download quarantine flag once:
    ```bash
@@ -51,7 +51,7 @@ Requires macOS 14+ (Apple Silicon), Rust 1.85+, and Xcode Command Line Tools (`x
 git clone https://github.com/JustinList/Fast-Mac-Search.git
 cd Fast-Mac-Search
 ./scripts/build-macos-app.sh
-open "dist/Fast-Mac-Search-0.3.0-arm64.dmg"
+open "dist/Fast-Mac-Search-0.3.1-arm64.dmg"
 ```
 
 ---
@@ -125,10 +125,10 @@ Measured on Apple Silicon (M4, release profile with `.cargo/config.toml` ARMv8 C
 | Shortcut | Action |
 |---|---|
 | **`⌥Space`** *(configurable in `⚡` menu)* | Toggle the floating Spotlight bar from any app or fullscreen Space |
-| **`⌘1` / `⌘2` / `⌘3`** | Switch scope between **`All`**, **`Files`**, and **`AI Chats`** |
-| **`⌥1` – `⌥9`** | Immediately launch / open numbered row `1`–`9` |
+| **`⌘1` – `⌘9`** | Immediately launch / open numbered row `1`–`9` |
+| **`⌃1` / `⌃2` / `⌃3`** *(or footer pills)* | Switch scope between **`All`**, **`Files`**, and **`AI`** |
 | **`@claude` / `@codex` / `@gemini` / `@chatgpt`** | Inline prefix filter inside the search bar for a specific AI assistant |
-| **Click outside / `Esc` / `✕`** | Dismiss the search bar (or return from in-panel Web Preview) |
+| **Click outside / `Esc`** | Dismiss the search bar (or return from in-panel Web Preview) |
 | **`Tab` / `→`** *(at end of query)* | Accept inline Ghost-Text autocomplete (top App, System 1, or Web completion) |
 | **`↑` / `↓` or `⌃P` / `⌃N`** | Glide selection across sectioned results |
 | **`Return`** | Open App / File, copy Calculator answer, read AI Conversation, or preview Web |
@@ -170,7 +170,7 @@ See [SECURITY.md](SECURITY.md) for full cryptographic details:
 
 ## Acknowledgments
 
-- **With thanks to [Nanolight](https://github.com/justrach/nanolight)** by [Rach Pradhan (`@justrach`)](https://github.com/justrach) (`MIT` License) — `v0.3.0` ports Nanolight's 7-tier macOS app launcher (word initials & Damerau-Levenshtein typo tolerance), live inline calculator, and sectioned Liquid Glass launcher UX natively into Fast Mac Search's Rust + Swift 6 zero-trust engine. Full MIT copyright & permission notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **With thanks to [Nanolight](https://github.com/justrach/nanolight)** by [Rach Pradhan (`@justrach`)](https://github.com/justrach) (`MIT` License) — `v0.3.x` ports Nanolight's 7-tier macOS app launcher (word initials & Damerau-Levenshtein typo tolerance), live inline calculator, and sectioned Liquid Glass launcher UX natively into Fast Mac Search's Rust + Swift 6 zero-trust engine. Full MIT copyright & permission notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

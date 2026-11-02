@@ -5,7 +5,7 @@ ROOT_DIR="${0:A:h:h}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_NAME="Fast Mac Search"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-VERSION="0.3.0"
+VERSION="0.3.1"
 DMG_STAGING="$DIST_DIR/.dmg-staging"
 DMG_PATH="$DIST_DIR/Fast-Mac-Search-${VERSION}-arm64.dmg"
 
@@ -125,7 +125,7 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/FastMacSearch" \
 
 printf "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
+cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -147,9 +147,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

@@ -213,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(openItem)
 
         let aiSearchItem = NSMenuItem(title: "Search AI Conversations…", action: #selector(openAiChatsOverlay), keyEquivalent: "3")
-        aiSearchItem.keyEquivalentModifierMask = [.command]
+        aiSearchItem.keyEquivalentModifierMask = [.control]
         aiSearchItem.target = self
         menu.addItem(aiSearchItem)
 

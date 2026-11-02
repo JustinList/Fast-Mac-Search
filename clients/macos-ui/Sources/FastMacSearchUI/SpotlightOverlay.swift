@@ -3,7 +3,7 @@ import Quartz
 import UniformTypeIdentifiers
 import WebKit
 
-/// Non-activating floating vibrancy Spotlight overlay panel that joins all macOS Spaces,
+/// Non-activating floating Nanolight-style Liquid Glass overlay panel that joins all macOS Spaces,
 /// renders over fullscreen apps at 120Hz ProMotion, and auto-dismisses when clicking outside.
 @MainActor
 public final class SpotlightPanel: NSPanel {
@@ -54,11 +54,20 @@ private enum WebRowKind: Sendable {
         }
     }
 
-    var badge: String {
+    var subtitle: String {
         switch self {
-        case .searchGoogle, .googleSuggestion: return "Google"
-        case .askGrok: return "Grok"
-        case .searchX: return "X"
+        case .searchGoogle: return "google.com"
+        case .googleSuggestion: return ""
+        case .askGrok: return "grok.com"
+        case .searchX: return "x.com · Latest"
+        }
+    }
+
+    var footerActionTitle: String {
+        switch self {
+        case .searchGoogle, .googleSuggestion: return "Search Google"
+        case .askGrok: return "Ask Grok"
+        case .searchX: return "Search X"
         }
     }
 
@@ -67,7 +76,7 @@ private enum WebRowKind: Sendable {
         case .searchGoogle: return "globe"
         case .googleSuggestion: return "magnifyingglass"
         case .askGrok: return "sparkles"
-        case .searchX: return "number"
+        case .searchX: return "xmark"
         }
     }
 
@@ -90,8 +99,8 @@ private enum WebRowKind: Sendable {
 
 private enum OverlayRowItem {
     case sectionHeader(String)
-    case calculator(CalcAnswerPayload)
-    case app(RankedAppHit, isSuggested: Bool, shortcutNumber: Int?)
+    case calculator(CalcAnswerPayload, isCopied: Bool, shortcutNumber: Int?)
+    case app(RankedAppHit, shortcutNumber: Int?)
     case searchHit(RankedHitPayload, matchedIndices: [Int], shortcutNumber: Int?)
     case web(WebRowKind, shortcutNumber: Int?)
 
@@ -102,21 +111,100 @@ private enum OverlayRowItem {
 
     var rowHeight: CGFloat {
         switch self {
-        case .sectionHeader: return 25
-        case .calculator: return 68
-        case .app: return 44
-        case .searchHit: return 50
-        case .web: return 40
+        case .sectionHeader: return 28
+        case .calculator: return 92
+        case .app, .searchHit, .web: return 40
         }
+    }
+
+    var shortcutNumber: Int? {
+        switch self {
+        case .sectionHeader: return nil
+        case .calculator(_, _, let n): return n
+        case .app(_, let n): return n
+        case .searchHit(_, _, let n): return n
+        case .web(_, let n): return n
+        }
+    }
+
+    var rowVerb: String {
+        switch self {
+        case .sectionHeader: return ""
+        case .calculator: return "Copy"
+        case .app: return "Open"
+        case .searchHit(let hit, _, _): return hit.is_llm_chat ? "Read" : "Open"
+        case .web: return "Go"
+        }
+    }
+
+    var footerActionTitle: String {
+        switch self {
+        case .sectionHeader: return "Open"
+        case .calculator: return "Copy Answer"
+        case .app: return "Open Application"
+        case .searchHit(let hit, _, _):
+            if hit.is_llm_chat { return "Read Conversation" }
+            return hit.is_dir ? "Open Folder" : "Open File"
+        case .web(let kind, _): return kind.footerActionTitle
+        }
+    }
+}
+
+/// Reusable Nanolight-style translucent keycap badge (`↩`, `esc`, etc.).
+@MainActor
+private final class KeycapBadgeView: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    init(text: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.borderWidth = 0.5
+
+        label.stringValue = text
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.alignment = .center
+        addSubview(label)
+        updateText(text)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func updateText(_ text: String) {
+        label.stringValue = text
+        label.sizeToFit()
+        let w = max(22, ceil(label.frame.width) + 10)
+        let h: CGFloat = 19
+        frame.size = NSSize(width: w, height: h)
+        label.frame = NSRect(x: 0, y: (h - label.frame.height) / 2 - 0.5, width: w, height: label.frame.height)
+        refreshColors()
+    }
+
+    func refreshColors() {
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer?.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.11)
+            : NSColor.black.withAlphaComponent(0.07)).cgColor
+        layer?.borderColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.16)
+            : NSColor.black.withAlphaComponent(0.12)).cgColor
+        label.textColor = .secondaryLabelColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshColors()
     }
 }
 
 @MainActor
 public final class SearchOverlayController: NSViewController, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, WKNavigationDelegate, WKUIDelegate {
-    public static let barWidth: CGFloat = 750
-    public static let collapsedHeight: CGFloat = 62
-    public static let footerHeight: CGFloat = 34
-    public static let maxExpandedHeight: CGFloat = 540
+    public static let barWidth: CGFloat = 680
+    public static let collapsedHeight: CGFloat = 58
+    public static let headerHeight: CGFloat = 58
+    public static let footerHeight: CGFloat = 38
+    public static let maxExpandedHeight: CGFloat = 548
     public static let webPreviewExpandedHeight: CGFloat = 560
 
     private let ipc: SearchdIPCClient
@@ -129,6 +217,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
     private var rows: [OverlayRowItem] = []
     private var latestCalc: CalcAnswerPayload?
+    private var isCalcRecentlyCopied = false
     private var latestAppHits: [RankedAppHit] = []
     private var latestDaemonHits: [RankedHitPayload] = []
     private var latestWebSuggestions: [String] = []
@@ -142,28 +231,36 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     private let queryQueue = DispatchQueue(label: "dev.fastmacsearch.ui.query", qos: .userInteractive)
     private var querySeq: UInt64 = 0
     nonisolated(unsafe) private var keyDownMonitor: Any?
-    private var footerFlashResetWork: DispatchWorkItem?
+    private var copiedResetWork: DispatchWorkItem?
 
-    // Views
+    // Nanolight Glass Shell & Clean Header
     private let vibrancyView = NSVisualEffectView()
-    private let iconLabel = NSTextField(labelWithString: "⌕")
+    private let tintOverlayView = NSView()
+    private let searchIconView = NSImageView()
     private let searchField = NSTextField()
     private let ghostLabel = NSTextField(labelWithString: "")
-    private let latencyPill = NSTextField(labelWithString: "⌥Space")
-    private let scopeControl = NSSegmentedControl(labels: ["All", "Files", "AI"], trackingMode: .selectOne, target: nil, action: nil)
-    private let drivesBtn = NSButton()
-    private let closeBtn = NSButton()
 
-    private let headerDivider = NSBox()
+    private let headerHairline = NSView()
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
     private let selectionPillView = NSView()
 
-    private let footerDivider = NSBox()
-    private let footerLeftLabel = NSTextField(labelWithString: "")
-    private let footerRightLabel = NSTextField(labelWithString: "")
+    // Nanolight Footer (`38pt`)
+    private let footerHairline = NSView()
+    private let footerBadgeTile = NSView()
+    private let footerBadgeIcon = NSImageView()
+    private let footerBrandLabel = NSTextField(labelWithString: "")
+    private let scopeButtonAll = NSButton()
+    private let scopeButtonFiles = NSButton()
+    private let scopeButtonAI = NSButton()
 
-    // Lazy In-Panel WKWebView Preview (only instantiated if Web Suggestions is toggled ON and used)
+    private let footerPrimaryActionLabel = NSTextField(labelWithString: "Open Application")
+    private let footerReturnCap = KeycapBadgeView(text: "↩")
+    private let footerPipeSeparator = NSTextField(labelWithString: "|")
+    private let footerCloseButton = NSButton()
+    private let footerEscCap = KeycapBadgeView(text: "esc")
+
+    // Lazy In-Panel WKWebView Preview
     private var webPreviewView: WKWebView?
     private var activeWebPreviewURL: URL?
 
@@ -183,87 +280,56 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
     public override func loadView() {
         let w = Self.barWidth
-        let h = Self.collapsedHeight
+        let h = Self.headerHeight + Self.footerHeight + 2
 
         vibrancyView.frame = NSRect(x: 0, y: 0, width: w, height: h)
         vibrancyView.autoresizingMask = [.width, .height]
-        vibrancyView.material = .hudWindow
+        vibrancyView.material = .popover
         vibrancyView.blendingMode = .behindWindow
         vibrancyView.state = .active
         vibrancyView.wantsLayer = true
-        vibrancyView.layer?.cornerRadius = 16
+        vibrancyView.layer?.cornerRadius = 18
         vibrancyView.layer?.masksToBounds = true
         vibrancyView.layer?.borderWidth = 1.0
-        vibrancyView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
 
-        iconLabel.font = .systemFont(ofSize: 21, weight: .medium)
-        iconLabel.textColor = .secondaryLabelColor
-        vibrancyView.addSubview(iconLabel)
+        tintOverlayView.wantsLayer = true
+        vibrancyView.addSubview(tintOverlayView)
 
-        ghostLabel.font = .systemFont(ofSize: 19, weight: .regular)
+        // Clean Nanolight Header: SF Symbol `magnifyingglass` + full-width 21pt bare query input + ghost completion
+        let magCfg = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        searchIconView.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search")?.withSymbolConfiguration(magCfg)
+        searchIconView.contentTintColor = .secondaryLabelColor
+        vibrancyView.addSubview(searchIconView)
+
+        ghostLabel.font = .systemFont(ofSize: 21, weight: .regular)
         ghostLabel.textColor = .tertiaryLabelColor
         ghostLabel.lineBreakMode = .byClipping
         vibrancyView.addSubview(ghostLabel)
 
-        searchField.placeholderString = "Apps, math (2^10*3), files, or AI chats (@claude, @codex)…"
-        searchField.font = .systemFont(ofSize: 19, weight: .regular)
+        searchField.placeholderString = "Search apps, files, AI chats (@claude), or do math…"
+        searchField.font = .systemFont(ofSize: 21, weight: .regular)
         searchField.isBordered = false
         searchField.drawsBackground = false
         searchField.focusRingType = .none
         searchField.delegate = self
         vibrancyView.addSubview(searchField)
 
-        latencyPill.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        latencyPill.textColor = .secondaryLabelColor
-        latencyPill.alignment = .right
-        vibrancyView.addSubview(latencyPill)
+        headerHairline.wantsLayer = true
+        vibrancyView.addSubview(headerHairline)
 
-        scopeControl.controlSize = .small
-        scopeControl.font = .systemFont(ofSize: 11, weight: .medium)
-        scopeControl.segmentStyle = .rounded
-        scopeControl.selectedSegment = 0
-        scopeControl.target = self
-        scopeControl.action = #selector(didChangeScopeSegment)
-        scopeControl.toolTip = "Scope: All (⌘1) · Files (⌘2) · AI Chats (⌘3)"
-        vibrancyView.addSubview(scopeControl)
-
-        drivesBtn.bezelStyle = .inline
-        drivesBtn.isBordered = false
-        drivesBtn.image = NSImage(systemSymbolName: "externaldrive.badge.plus", accessibilityDescription: "Manage Drives & Folders")
-        drivesBtn.contentTintColor = .secondaryLabelColor
-        drivesBtn.toolTip = "Add or Manage Indexed Drives & Folders (⌘,)"
-        drivesBtn.target = self
-        drivesBtn.action = #selector(didTapDrivesButton)
-        vibrancyView.addSubview(drivesBtn)
-
-        closeBtn.bezelStyle = .inline
-        closeBtn.isBordered = false
-        closeBtn.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Hide Search Bar")
-        closeBtn.contentTintColor = .tertiaryLabelColor
-        closeBtn.toolTip = "Hide Search Bar (Esc or ⌥Space)"
-        closeBtn.target = self
-        closeBtn.action = #selector(didTapCloseButton)
-        vibrancyView.addSubview(closeBtn)
-
-        headerDivider.boxType = .separator
-        headerDivider.isHidden = true
-        vibrancyView.addSubview(headerDivider)
-
-        // Sliding Nanolight glass selection pill inside NSTableView
+        // Sliding Nanolight frosted selection step inside NSTableView
         selectionPillView.wantsLayer = true
-        selectionPillView.layer?.cornerRadius = 9
-        selectionPillView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.13).cgColor
+        selectionPillView.layer?.cornerRadius = 10
         selectionPillView.layer?.borderWidth = 0.5
-        selectionPillView.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
         selectionPillView.layer?.zPosition = -1
         selectionPillView.isHidden = true
 
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("UnifiedCol"))
-        column.width = w - 16
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NanolightCol"))
+        column.width = w - 12
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = 46
-        tableView.intercellSpacing = NSSize(width: 0, height: 1)
+        tableView.rowHeight = 40
+        tableView.intercellSpacing = .zero
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
         tableView.style = .plain
@@ -277,29 +343,85 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = tableView
-        scrollView.isHidden = true
         vibrancyView.addSubview(scrollView)
 
-        footerDivider.boxType = .separator
-        footerDivider.isHidden = true
-        vibrancyView.addSubview(footerDivider)
+        footerHairline.wantsLayer = true
+        vibrancyView.addSubview(footerHairline)
 
-        footerLeftLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        footerLeftLabel.textColor = .secondaryLabelColor
-        footerLeftLabel.lineBreakMode = .byTruncatingTail
-        footerLeftLabel.isHidden = true
-        vibrancyView.addSubview(footerLeftLabel)
+        // Nanolight Footer Left: Mini app icon tile + brand/count telemetry + subtle All · Files · AI pills
+        footerBadgeTile.wantsLayer = true
+        footerBadgeTile.layer?.cornerRadius = 4.5
+        footerBadgeTile.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.18).cgColor
+        vibrancyView.addSubview(footerBadgeTile)
 
-        footerRightLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
-        footerRightLabel.textColor = .secondaryLabelColor
-        footerRightLabel.alignment = .right
-        footerRightLabel.lineBreakMode = .byTruncatingHead
-        footerRightLabel.isHidden = true
-        vibrancyView.addSubview(footerRightLabel)
+        let boltCfg = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        footerBadgeIcon.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?.withSymbolConfiguration(boltCfg)
+        footerBadgeIcon.contentTintColor = .systemYellow
+        footerBadgeTile.addSubview(footerBadgeIcon)
+
+        footerBrandLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        footerBrandLabel.textColor = .secondaryLabelColor
+        footerBrandLabel.lineBreakMode = .byTruncatingTail
+        vibrancyView.addSubview(footerBrandLabel)
+
+        configureFooterScopePill(scopeButtonAll, title: "All", tag: 0)
+        configureFooterScopePill(scopeButtonFiles, title: "Files", tag: 1)
+        configureFooterScopePill(scopeButtonAI, title: "AI", tag: 2)
+        vibrancyView.addSubview(scopeButtonAll)
+        vibrancyView.addSubview(scopeButtonFiles)
+        vibrancyView.addSubview(scopeButtonAI)
+
+        // Nanolight Footer Right: `<Verb> [↩]  |  Close [esc]`
+        footerPrimaryActionLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        footerPrimaryActionLabel.textColor = .labelColor
+        footerPrimaryActionLabel.alignment = .right
+        vibrancyView.addSubview(footerPrimaryActionLabel)
+        vibrancyView.addSubview(footerReturnCap)
+
+        footerPipeSeparator.font = .systemFont(ofSize: 12, weight: .regular)
+        footerPipeSeparator.textColor = .quaternaryLabelColor
+        vibrancyView.addSubview(footerPipeSeparator)
+
+        footerCloseButton.title = "Close"
+        footerCloseButton.isBordered = false
+        footerCloseButton.font = .systemFont(ofSize: 12, weight: .medium)
+        footerCloseButton.contentTintColor = .secondaryLabelColor
+        footerCloseButton.target = self
+        footerCloseButton.action = #selector(didTapCloseButton)
+        vibrancyView.addSubview(footerCloseButton)
+        vibrancyView.addSubview(footerEscCap)
 
         self.view = vibrancyView
+        refreshScopePillAppearance()
         installPanelKeyShortcutsMonitor()
         relayoutSubviews(forHeight: h)
+    }
+
+    private func configureFooterScopePill(_ btn: NSButton, title: String, tag: Int) {
+        btn.title = title
+        btn.tag = tag
+        btn.isBordered = false
+        btn.wantsLayer = true
+        btn.layer?.cornerRadius = 5
+        btn.font = .systemFont(ofSize: 11, weight: .medium)
+        btn.target = self
+        btn.action = #selector(didClickScopePill(_:))
+        btn.toolTip = "Filter Scope (⌃\(tag + 1))"
+    }
+
+    @objc private func didClickScopePill(_ sender: NSButton) {
+        selectScope(index: sender.tag)
+        view.window?.makeFirstResponder(searchField)
+    }
+
+    private func refreshScopePillAppearance() {
+        let isDark = vibrancyView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let activeBg = (isDark ? NSColor.white.withAlphaComponent(0.14) : NSColor.black.withAlphaComponent(0.09)).cgColor
+        for btn in [scopeButtonAll, scopeButtonFiles, scopeButtonAI] {
+            let isSelected = (btn.tag == selectedScopeIndex)
+            btn.layer?.backgroundColor = isSelected ? activeBg : NSColor.clear.cgColor
+            btn.contentTintColor = isSelected ? .labelColor : .tertiaryLabelColor
+        }
     }
 
     private func installPanelKeyShortcutsMonitor() {
@@ -307,7 +429,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             guard let self = self, self.view.window?.isKeyWindow == true else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
-            // When In-Panel Web Preview is active: Esc closes preview, ⌘[ goes back, ⌘Return opens in browser
             if self.isShowingWebPreview {
                 if event.keyCode == 53 { // Escape
                     self.hideWebPreview()
@@ -327,19 +448,15 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                 }
             }
 
-            // ⌘1 / ⌘2 / ⌘3 switches All | Files | AI scope
+            // ⌘1 – ⌘9 immediately runs row #1–#9 (exact Nanolight shortcut!)
             if flags == .command, let chars = event.charactersIgnoringModifiers {
-                switch chars {
-                case "1":
-                    self.selectScope(index: 0)
-                    return nil
-                case "2":
-                    self.selectScope(index: 1)
-                    return nil
-                case "3":
-                    self.selectScope(index: 2)
-                    return nil
-                case "y", "Y":
+                if let digit = Int(chars), (1...9).contains(digit) {
+                    if self.triggerShortcutNumber(digit) {
+                        return nil
+                    }
+                }
+                switch chars.lowercased() {
+                case "y":
                     self.toggleQuickLook()
                     return nil
                 case ",":
@@ -350,24 +467,26 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                 }
             }
 
-            // ⌥1 – ⌥9 immediately launches actionable row #1–#9!
-            if flags == .option, let chars = event.charactersIgnoringModifiers,
-               let digit = Int(chars), (1...9).contains(digit)
-            {
-                if self.triggerShortcutNumber(digit) {
-                    return nil
-                }
-            }
-
-            // ⌃N / ⌃P Emacs-style navigation (like Nanolight)
+            // ⌃1 / ⌃2 / ⌃3 switches All | Files | AI scope (and ⌃N / ⌃P moves rows)
             if flags == .control, let chars = event.charactersIgnoringModifiers?.lowercased() {
-                if chars == "n" {
+                switch chars {
+                case "1":
+                    self.selectScope(index: 0)
+                    return nil
+                case "2":
+                    self.selectScope(index: 1)
+                    return nil
+                case "3":
+                    self.selectScope(index: 2)
+                    return nil
+                case "n":
                     self.moveSelection(delta: 1)
                     return nil
-                }
-                if chars == "p" {
+                case "p":
                     self.moveSelection(delta: -1)
                     return nil
+                default:
+                    break
                 }
             }
 
@@ -384,47 +503,76 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
     private func relayoutSubviews(forHeight h: CGFloat) {
         let w = Self.barWidth
-        let headerCenterY = h - (Self.collapsedHeight / 2.0)
-
-        iconLabel.frame = NSRect(x: 18, y: headerCenterY - 14, width: 26, height: 28)
-        ghostLabel.frame = NSRect(x: 48, y: headerCenterY - 13, width: 358, height: 26)
-        searchField.frame = NSRect(x: 48, y: headerCenterY - 13, width: 358, height: 26)
-        latencyPill.frame = NSRect(x: 410, y: headerCenterY - 8, width: 124, height: 18)
-        scopeControl.frame = NSRect(x: 540, y: headerCenterY - 11, width: 140, height: 22)
-        drivesBtn.frame = NSRect(x: w - 62, y: headerCenterY - 12, width: 24, height: 24)
-        closeBtn.frame = NSRect(x: w - 34, y: headerCenterY - 11, width: 22, height: 22)
-
-        // Update selection pill contrast dynamically for light/dark appearance
         let isDark = vibrancyView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+
+        vibrancyView.layer?.borderColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.13)
+            : NSColor.black.withAlphaComponent(0.10)).cgColor
+        tintOverlayView.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        tintOverlayView.layer?.backgroundColor = (isDark
+            ? NSColor(calibratedWhite: 0.09, alpha: 0.44)
+            : NSColor.white.withAlphaComponent(0.42)).cgColor
+
+        let hairColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.10)
+            : NSColor.black.withAlphaComponent(0.08)).cgColor
+        headerHairline.layer?.backgroundColor = hairColor
+        footerHairline.layer?.backgroundColor = hairColor
+
         selectionPillView.layer?.backgroundColor = (isDark
             ? NSColor.white.withAlphaComponent(0.14)
             : NSColor.black.withAlphaComponent(0.08)).cgColor
         selectionPillView.layer?.borderColor = (isDark
-            ? NSColor.white.withAlphaComponent(0.16)
-            : NSColor.black.withAlphaComponent(0.08)).cgColor
+            ? NSColor.white.withAlphaComponent(0.15)
+            : NSColor.black.withAlphaComponent(0.07)).cgColor
 
-        let expanded = h > Self.collapsedHeight + 8
-        headerDivider.isHidden = !expanded
-        footerDivider.isHidden = !expanded
-        footerLeftLabel.isHidden = !expanded
-        footerRightLabel.isHidden = !expanded
+        // Header (`58pt` from top)
+        let headerTopY = h - Self.headerHeight
+        searchIconView.frame = NSRect(x: 20, y: headerTopY + 18, width: 22, height: 22)
+        ghostLabel.frame = NSRect(x: 50, y: headerTopY + 15, width: w - 70, height: 28)
+        searchField.frame = NSRect(x: 50, y: headerTopY + 15, width: w - 70, height: 28)
 
-        if !expanded {
+        let hasBody = h > Self.headerHeight + 8
+        headerHairline.isHidden = !hasBody
+        footerHairline.isHidden = !hasBody
+        footerBadgeTile.isHidden = !hasBody
+        footerBrandLabel.isHidden = !hasBody
+        scopeButtonAll.isHidden = !hasBody
+        scopeButtonFiles.isHidden = !hasBody
+        scopeButtonAI.isHidden = !hasBody
+        footerPrimaryActionLabel.isHidden = !hasBody
+        footerReturnCap.isHidden = !hasBody
+        footerPipeSeparator.isHidden = !hasBody
+        footerCloseButton.isHidden = !hasBody
+        footerEscCap.isHidden = !hasBody
+
+        if !hasBody {
             scrollView.isHidden = true
             webPreviewView?.isHidden = true
             return
         }
 
-        headerDivider.frame = NSRect(x: 0, y: h - Self.collapsedHeight, width: w, height: 1)
-        footerDivider.frame = NSRect(x: 0, y: Self.footerHeight, width: w, height: 1)
-        footerLeftLabel.frame = NSRect(x: 16, y: 9, width: 330, height: 16)
-        footerRightLabel.frame = NSRect(x: 350, y: 9, width: w - 366, height: 16)
+        headerHairline.frame = NSRect(x: 0, y: headerTopY, width: w, height: 1)
+        footerHairline.frame = NSRect(x: 0, y: Self.footerHeight, width: w, height: 1)
+
+        // Footer Left (`y = 0..38`)
+        footerBadgeTile.frame = NSRect(x: 16, y: 10, width: 18, height: 18)
+        footerBadgeIcon.frame = NSRect(x: 3, y: 3, width: 12, height: 12)
+        footerBrandLabel.frame = NSRect(x: 40, y: 10, width: 218, height: 17)
+
+        scopeButtonAll.frame = NSRect(x: 264, y: 9, width: 30, height: 20)
+        scopeButtonFiles.frame = NSRect(x: 297, y: 9, width: 38, height: 20)
+        scopeButtonAI.frame = NSRect(x: 338, y: 9, width: 28, height: 20)
+        refreshScopePillAppearance()
+
+        // Footer Right (`<Verb> [↩] | Close [esc]`)
+        layoutFooterRightCluster(panelWidth: w)
 
         let bodyFrame = NSRect(
             x: 0,
             y: Self.footerHeight + 1,
             width: w,
-            height: max(0, h - Self.collapsedHeight - Self.footerHeight - 2)
+            height: max(0, headerTopY - Self.footerHeight - 1)
         )
 
         if isShowingWebPreview {
@@ -434,9 +582,36 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             scrollView.isHidden = false
             scrollView.frame = bodyFrame
             if let col = tableView.tableColumns.first {
-                col.width = w - 16
+                col.width = w - 12
             }
         }
+    }
+
+    private func layoutFooterRightCluster(panelWidth w: CGFloat) {
+        footerEscCap.refreshColors()
+        footerReturnCap.refreshColors()
+
+        var rightX = w - 16
+        let escSize = footerEscCap.frame.size
+        rightX -= escSize.width
+        footerEscCap.frame = NSRect(x: rightX, y: 9.5, width: escSize.width, height: escSize.height)
+
+        footerCloseButton.sizeToFit()
+        let closeW = ceil(footerCloseButton.frame.width)
+        rightX -= (closeW + 4)
+        footerCloseButton.frame = NSRect(x: rightX, y: 9, width: closeW, height: 20)
+
+        rightX -= 14
+        footerPipeSeparator.frame = NSRect(x: rightX, y: 10, width: 10, height: 17)
+
+        let retSize = footerReturnCap.frame.size
+        rightX -= (retSize.width + 4)
+        footerReturnCap.frame = NSRect(x: rightX, y: 9.5, width: retSize.width, height: retSize.height)
+
+        footerPrimaryActionLabel.sizeToFit()
+        let verbW = min(190, ceil(footerPrimaryActionLabel.frame.width) + 4)
+        rightX -= (verbW + 6)
+        footerPrimaryActionLabel.frame = NSRect(x: rightX, y: 10, width: verbW, height: 17)
     }
 
     private func resizePanelKeepingTopEdge(targetHeight: CGFloat) {
@@ -444,7 +619,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let maxH = isShowingWebPreview ? Self.webPreviewExpandedHeight : Self.maxExpandedHeight
         let clamped = max(Self.collapsedHeight, min(maxH, targetHeight))
         let oldFrame = win.frame
-        if abs(oldFrame.height - clamped) < 1.0 {
+        if abs(oldFrame.height - clamped) < 0.5 {
             relayoutSubviews(forHeight: clamped)
             return
         }
@@ -457,8 +632,8 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     public func selectScope(index: Int) {
         let clamped = max(0, min(2, index))
         selectedScopeIndex = clamped
-        scopeControl.selectedSegment = clamped
         hideWebPreview(restoreFocus: false)
+        refreshScopePillAppearance()
         updatePlaceholderForScope()
         runKeystrokeQuery(searchField.stringValue)
     }
@@ -478,11 +653,11 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     private func updatePlaceholderForScope() {
         switch selectedScopeIndex {
         case 1:
-            searchField.placeholderString = "Search files, paths, or document contents…"
+            searchField.placeholderString = "Search encrypted files, paths, or document contents…"
         case 2:
-            searchField.placeholderString = "Search Claude, Codex, Gemini & ChatGPT chats…"
+            searchField.placeholderString = "Search Claude, Codex, Gemini & ChatGPT conversations…"
         default:
-            searchField.placeholderString = "Apps, math (2^10*3), files, or AI chats (@claude, @codex)…"
+            searchField.placeholderString = "Search apps, files, AI chats (@claude), or do math…"
         }
     }
 
@@ -493,11 +668,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         runKeystrokeQuery(searchField.stringValue)
         self.view.window?.makeFirstResponder(searchField)
         searchField.selectText(nil)
-    }
-
-    @objc private func didChangeScopeSegment() {
-        selectScope(index: scopeControl.selectedSegment)
-        self.view.window?.makeFirstResponder(searchField)
     }
 
     @objc private func didTapDrivesButton() {
@@ -514,6 +684,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         if isShowingWebPreview {
             hideWebPreview(restoreFocus: false)
         }
+        isCalcRecentlyCopied = false
         runKeystrokeQuery(searchField.stringValue)
     }
 
@@ -527,9 +698,9 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let hasProviderTag = trimmed.hasPrefix("@")
 
         // 1. Empty Query Behavior:
-        //    - `All`: Show Nanolight's `SUGGESTIONS` (most-opened macOS apps)!
-        //    - `Files`: Collapse cleanly to compact 62pt bar.
-        //    - `AI`: Fetch & list most recent encrypted AI conversations!
+        //    - `All`: Show Nanolight's `Suggestions` (top 5 most-opened macOS apps)!
+        //    - `Files`: Clean minimal bar + footer.
+        //    - `AI`: Show recent encrypted AI conversations!
         if trimmed.isEmpty {
             latestCalc = nil
             latestWebSuggestions = []
@@ -539,7 +710,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             if scopeWire == "all" {
                 latestAppHits = appIndex.suggestedApps(limit: 5)
                 latestDaemonHits = []
-                latencyPill.stringValue = "⌥Space"
                 rebuildUnifiedRows(forQuery: rawText, isEmptySuggestions: true, animateSelection: false)
                 return
             } else if scopeWire == "files" {
@@ -547,10 +717,10 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                 latestDaemonHits = []
                 rows = []
                 updateGhostDisplay(rawInput: "", suffix: nil)
-                latencyPill.stringValue = "⌥Space"
                 selectionPillView.isHidden = true
                 tableView.reloadData()
-                resizePanelKeepingTopEdge(targetHeight: Self.collapsedHeight)
+                updateFooterLabels()
+                resizePanelKeepingTopEdge(targetHeight: Self.headerHeight + Self.footerHeight + 2)
                 return
             }
         }
@@ -558,7 +728,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         // 2. Synchronous <0.05ms Nanolight Reflex (Calculator + macOS Applications + Cached Web Stand-Ins)
         if scopeWire == "all" && !hasProviderTag {
             latestCalc = MathCalculator.evaluate(trimmed)
-            latestAppHits = appIndex.rankApps(query: trimmed, limit: 4)
+            latestAppHits = appIndex.rankApps(query: trimmed, limit: 5)
             if latestCalc == nil {
                 latestWebSuggestions = webSuggest.completions(for: trimmed) { [weak self] answeredQuery, completions in
                     guard let self = self else { return }
@@ -578,11 +748,11 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             latestWebSuggestions = []
         }
 
-        // Pure math expression fast-path (just like Nanolight: Calculator + matching Apps only, <0.02 ms!)
+        // Pure math expression fast-path (<0.02ms): Calculator hero card + any matching Apps
         if scopeWire == "all" && latestCalc != nil {
             latestDaemonHits = []
             latestDaemonGhostSuffix = nil
-            latencyPill.stringValue = "⚡ <0.02 ms"
+            latestElapsedMs = 0.01
             rebuildUnifiedRows(forQuery: rawText, isEmptySuggestions: false, animateSelection: false)
             return
         }
@@ -595,7 +765,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         // 3. Asynchronous ~0.3ms Encrypted `searchd` Query (Files + Cross-LLM Conversations)
         let ctx = QueryContextPayload(activeAppBundleId: capturedAppBundleId)
         let client = self.ipc
-        let fetchLimit = (scopeWire == "all") ? 8 : 12
+        let fetchLimit = (scopeWire == "all") ? 7 : 11
 
         queryQueue.async { [weak self] in
             do {
@@ -609,15 +779,8 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                         self.latestCalc = daemonCalc
                     }
 
-                    let ms = Double(resp.total_elapsed_us) / 1000.0
-                    self.latestElapsedMs = ms
+                    self.latestElapsedMs = Double(resp.total_elapsed_us) / 1000.0
                     self.latestIndexedCount = resp.total_indexed_paths
-
-                    if resp.total_indexed_paths == 0 && self.latestAppHits.isEmpty && self.latestCalc == nil {
-                        self.latencyPill.stringValue = "Index drive ↗"
-                    } else {
-                        self.latencyPill.stringValue = String(format: "⚡ %.2f ms", ms)
-                    }
 
                     self.rebuildUnifiedRows(
                         forQuery: rawText,
@@ -628,7 +791,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             } catch {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self, self.querySeq == mySeq else { return }
-                    self.latencyPill.stringValue = self.latestAppHits.isEmpty ? "Starting…" : "Apps Ready"
                     self.rebuildUnifiedRows(forQuery: rawText, isEmptySuggestions: false, animateSelection: false)
                 }
             }
@@ -644,7 +806,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         let previousSelectedRow = tableView.selectedRow
         let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Strip `@provider` tag when computing matched-letter highlights on titles
         let highlightNeedle: String = {
             if trimmed.hasPrefix("@"), let spaceIdx = trimmed.firstIndex(of: " ") {
                 return String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
@@ -660,27 +821,26 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             return nextShortcut
         }
 
-        // Section 1: Calculator
+        // Section 1: Calculator Hero Card
         if let calc = latestCalc {
-            built.append(.sectionHeader("CALCULATOR"))
-            built.append(.calculator(calc))
+            built.append(.sectionHeader("Calculator"))
+            built.append(.calculator(calc, isCopied: isCalcRecentlyCopied, shortcutNumber: claimShortcut()))
         }
 
         // Section 2: Applications (or Empty-Query Frequent App Suggestions)
         if !latestAppHits.isEmpty {
-            built.append(.sectionHeader(isEmptySuggestions ? "SUGGESTIONS" : "APPLICATIONS"))
+            built.append(.sectionHeader(isEmptySuggestions ? "Suggestions" : "Applications"))
             for appHit in latestAppHits {
-                built.append(.app(appHit, isSuggested: isEmptySuggestions, shortcutNumber: claimShortcut()))
+                built.append(.app(appHit, shortcutNumber: claimShortcut()))
             }
         }
 
-        // Separate Daemon Hits into AI Conversations vs Files & Folders for clean Nanolight sections
         let aiHits = latestDaemonHits.filter { $0.is_llm_chat }
         let fileHits = latestDaemonHits.filter { !$0.is_llm_chat }
 
         // Section 3: AI Conversations
         if !aiHits.isEmpty {
-            built.append(.sectionHeader(trimmed.isEmpty ? "RECENT AI CONVERSATIONS" : "AI CONVERSATIONS"))
+            built.append(.sectionHeader(trimmed.isEmpty ? "Recent AI Conversations" : "AI Conversations"))
             for hit in aiHits {
                 let indices = highlightNeedle.isEmpty
                     ? []
@@ -691,7 +851,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
         // Section 4: Encrypted Files & Folders
         if !fileHits.isEmpty {
-            built.append(.sectionHeader("FILES & FOLDERS"))
+            built.append(.sectionHeader("Files"))
             for hit in fileHits {
                 let indices = highlightNeedle.isEmpty
                     ? []
@@ -701,21 +861,22 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         }
 
         // Section 5: Opt-In Privacy-Guarded Web Suggestions + Ask Grok / Search X
-        // Strictly shown ONLY when WebSuggestions is toggled ON in ⚡ menu and query isn't math or @tag!
         if WebSuggestClient.isEnabled,
            currentScopeWireValue() == "all",
            !trimmed.isEmpty,
            !trimmed.hasPrefix("@"),
            latestCalc == nil
         {
-            built.append(.sectionHeader("GOOGLE"))
-            built.append(.web(.searchGoogle(query: trimmed), shortcutNumber: claimShortcut()))
-            for sug in latestWebSuggestions.prefix(3) {
-                built.append(.web(.googleSuggestion(typed: trimmed, suggestion: sug), shortcutNumber: claimShortcut()))
+            if !latestWebSuggestions.isEmpty {
+                built.append(.sectionHeader("Google"))
+                for sug in latestWebSuggestions.prefix(3) {
+                    built.append(.web(.googleSuggestion(typed: trimmed, suggestion: sug), shortcutNumber: claimShortcut()))
+                }
             }
-            built.append(.sectionHeader("ASK & SEARCH"))
+            built.append(.sectionHeader("Ask & Search"))
             built.append(.web(.askGrok(query: trimmed), shortcutNumber: claimShortcut()))
             built.append(.web(.searchX(query: trimmed), shortcutNumber: claimShortcut()))
+            built.append(.web(.searchGoogle(query: trimmed), shortcutNumber: claimShortcut()))
         }
 
         self.rows = built
@@ -723,21 +884,13 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
         tableView.reloadData()
 
-        if rows.isEmpty {
-            selectionPillView.isHidden = true
-            resizePanelKeepingTopEdge(targetHeight: Self.collapsedHeight)
-            return
-        }
-
-        // Calculate exact content height + header + Nanolight action footer
-        var contentH: CGFloat = 6
+        var contentH: CGFloat = rows.isEmpty ? 0 : 12
         for item in rows {
-            contentH += item.rowHeight + tableView.intercellSpacing.height
+            contentH += item.rowHeight
         }
-        let desiredH = Self.collapsedHeight + contentH + Self.footerHeight + 4
+        let desiredH = Self.headerHeight + Self.footerHeight + 2 + contentH
         resizePanelKeepingTopEdge(targetHeight: desiredH)
 
-        // Select first actionable row (or preserve row index when async web completions arrive)
         var targetRow: Int?
         if preserveSelection,
            previousSelectedRow >= 0,
@@ -751,6 +904,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
 
         if let sel = targetRow {
             tableView.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+            refreshRowSelectionStates()
             updateSlidingSelectionPill(animated: animateSelection)
         } else {
             selectionPillView.isHidden = true
@@ -758,42 +912,42 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         updateFooterLabels()
     }
 
-    /// Computes pixel-aligned inline ghost suffix:
-    /// 1. Top matching Application name starting with typed query (`"saf"` -> `"ari"`)
-    /// 2. System 1 Markov/file ghost prediction
-    /// 3. Top Google suggestion (if Web Suggestions enabled)
+    /// Safe `Array(Character)` prefix comparison so Unicode case-folding can never trap `String.Index`.
+    private static func caseInsensitiveCompletionSuffix(input: String, candidate: String) -> String? {
+        let inChars = Array(input)
+        let candChars = Array(candidate)
+        guard !inChars.isEmpty, candChars.count > inChars.count else { return nil }
+        for idx in 0..<inChars.count {
+            if inChars[idx].lowercased() != candChars[idx].lowercased() {
+                return nil
+            }
+        }
+        return String(candChars[inChars.count...])
+    }
+
     private func computeInlineGhostCompletion(rawInput: String) {
         guard latestCalc == nil, !rawInput.isEmpty, rawInput == rawInput.trimmingCharacters(in: .newlines) else {
             updateGhostDisplay(rawInput: "", suffix: nil)
             return
         }
 
-        let lowerInput = rawInput.lowercased()
-
-        // Priority 1: Top App prefix completion
         if let topApp = latestAppHits.first?.app.name,
-           topApp.count > rawInput.count,
-           topApp.lowercased().hasPrefix(lowerInput)
+           let suffix = Self.caseInsensitiveCompletionSuffix(input: rawInput, candidate: topApp)
         {
-            let suffixIdx = topApp.index(topApp.startIndex, offsetBy: rawInput.count)
-            updateGhostDisplay(rawInput: rawInput, suffix: String(topApp[suffixIdx...]))
+            updateGhostDisplay(rawInput: rawInput, suffix: suffix)
             return
         }
 
-        // Priority 2: System 1 file/query ghost prediction
         if let s1Suffix = latestDaemonGhostSuffix, !s1Suffix.isEmpty {
             updateGhostDisplay(rawInput: rawInput, suffix: s1Suffix)
             return
         }
 
-        // Priority 3: Top Google completion (only when Web Suggestions enabled)
         if WebSuggestClient.isEnabled,
            let topSug = latestWebSuggestions.first,
-           topSug.count > rawInput.count,
-           topSug.lowercased().hasPrefix(lowerInput)
+           let suffix = Self.caseInsensitiveCompletionSuffix(input: rawInput, candidate: topSug)
         {
-            let suffixIdx = topSug.index(topSug.startIndex, offsetBy: rawInput.count)
-            updateGhostDisplay(rawInput: rawInput, suffix: String(topSug[suffixIdx...]))
+            updateGhostDisplay(rawInput: rawInput, suffix: suffix)
             return
         }
 
@@ -807,9 +961,8 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             return
         }
         activeGhostSuffix = suffix
-        let font = searchField.font ?? .systemFont(ofSize: 19, weight: .regular)
+        let font = searchField.font ?? .systemFont(ofSize: 21, weight: .regular)
 
-        // Render `rawInput` in `.clear` with identical font so glyph kerning & advance match 100%
         let attr = NSMutableAttributedString(
             string: rawInput,
             attributes: [
@@ -841,7 +994,16 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         return true
     }
 
-    // MARK: - Smooth Sliding Selection Pill & Dynamic Nanolight Action Footer
+    // MARK: - Smooth Sliding Selection Pill & Dynamic Nanolight Footer
+
+    private func refreshRowSelectionStates() {
+        let selected = tableView.selectedRow
+        for r in 0..<rows.count {
+            if let cell = tableView.view(atColumn: 0, row: r, makeIfNecessary: false) as? SelectableNanolightCell {
+                cell.setRowSelected(r == selected)
+            }
+        }
+    }
 
     private func updateSlidingSelectionPill(animated: Bool) {
         let row = tableView.selectedRow
@@ -854,7 +1016,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             selectionPillView.isHidden = true
             return
         }
-        let pillFrame = rawRect.insetBy(dx: 8, dy: 2)
+        let pillFrame = rawRect.insetBy(dx: 8, dy: 1)
         if selectionPillView.isHidden || !animated {
             selectionPillView.frame = pillFrame
             selectionPillView.isHidden = false
@@ -867,67 +1029,32 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         }
     }
 
-    private func flashFooterMessage(_ text: String) {
-        footerFlashResetWork?.cancel()
-        footerLeftLabel.textColor = .systemGreen
-        footerLeftLabel.stringValue = text
-
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.footerLeftLabel.textColor = .secondaryLabelColor
-                self.updateFooterLabels()
-            }
-        }
-        footerFlashResetWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
-    }
-
     private func updateFooterLabels() {
         if isShowingWebPreview {
-            footerLeftLabel.textColor = .secondaryLabelColor
-            footerLeftLabel.stringValue = activeWebPreviewURL?.host ?? "Web Preview"
-            footerRightLabel.stringValue = "⎋ Back to List   ⌘[ Back   ⌘↵ Open in Browser"
+            footerBrandLabel.stringValue = activeWebPreviewURL?.host ?? "Web Preview"
+            footerPrimaryActionLabel.stringValue = "Open in Browser"
+            footerReturnCap.updateText("⌘↩")
+            footerCloseButton.title = "Back"
+            layoutFooterRightCluster(panelWidth: Self.barWidth)
             return
         }
 
-        if footerLeftLabel.textColor != .systemGreen {
-            if let ms = latestElapsedMs {
-                let countFmt = NumberFormatter.localizedString(from: NSNumber(value: latestIndexedCount), number: .decimal)
-                footerLeftLabel.stringValue = String(format: "⚡ %.2f ms · %@ encrypted items", ms, countFmt)
-            } else {
-                footerLeftLabel.stringValue = WebSuggestClient.isEnabled
-                    ? "Fast Mac Search · Web Suggestions On"
-                    : "Fast Mac Search · 100% Local Zero-Trust"
-            }
+        footerReturnCap.updateText("↩")
+        footerCloseButton.title = "Close"
+
+        if let ms = latestElapsedMs {
+            footerBrandLabel.stringValue = String(format: "Fast Mac Search · %.2f ms", ms)
+        } else {
+            footerBrandLabel.stringValue = "Fast Mac Search · \(appIndex.appCount) apps"
         }
 
         let row = tableView.selectedRow
-        guard row >= 0, row < rows.count else {
-            footerRightLabel.stringValue = ""
-            return
+        if row >= 0, row < rows.count, rows[row].isSelectable {
+            footerPrimaryActionLabel.stringValue = rows[row].footerActionTitle
+        } else {
+            footerPrimaryActionLabel.stringValue = "Manage Drives (⌘,)"
         }
-
-        switch rows[row] {
-        case .sectionHeader:
-            footerRightLabel.stringValue = ""
-        case .calculator(let calc):
-            footerRightLabel.stringValue = calc.hex != nil
-                ? "↵ Copy Answer   ⌘↵ Copy Hex"
-                : "↵ Copy Answer"
-        case .app:
-            footerRightLabel.stringValue = "↵ Open Application   ⌘↵ Show in Finder"
-        case .searchHit(let hit, _, _):
-            if hit.is_llm_chat {
-                footerRightLabel.stringValue = "↵ Read Conversation   ⌘↵ Reveal Transcript"
-            } else {
-                footerRightLabel.stringValue = "↵ Open   ⌘Y QuickLook   ⌘↵ Show in Finder"
-            }
-        case .web(let webKind, _):
-            footerRightLabel.stringValue = webKind.opensInPanelPreview
-                ? "↵ Preview in Panel   ⌘↵ Open in Browser"
-                : "↵ Open in Browser"
-        }
+        layoutFooterRightCluster(panelWidth: Self.barWidth)
     }
 
     // MARK: - Keyboard Navigation & Execution
@@ -945,6 +1072,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             if rows[idx].isSelectable {
                 tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
                 tableView.scrollRowToVisible(idx)
+                refreshRowSelectionStates()
                 updateSlidingSelectionPill(animated: true)
                 updateFooterLabels()
                 return
@@ -954,20 +1082,12 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     }
 
     private func triggerShortcutNumber(_ num: Int) -> Bool {
-        for (rowIdx, item) in rows.enumerated() {
-            let itemNum: Int?
-            switch item {
-            case .app(_, _, let n): itemNum = n
-            case .searchHit(_, _, let n): itemNum = n
-            case .web(_, let n): itemNum = n
-            default: itemNum = nil
-            }
-            if itemNum == num {
-                tableView.selectRowIndexes(IndexSet(integer: rowIdx), byExtendingSelection: false)
-                updateSlidingSelectionPill(animated: false)
-                executeRow(at: rowIdx, commandModified: false)
-                return true
-            }
+        for (rowIdx, item) in rows.enumerated() where item.shortcutNumber == num {
+            tableView.selectRowIndexes(IndexSet(integer: rowIdx), byExtendingSelection: false)
+            refreshRowSelectionStates()
+            updateSlidingSelectionPill(animated: false)
+            executeRow(at: rowIdx, commandModified: false)
+            return true
         }
         return false
     }
@@ -986,7 +1106,6 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                 return true
             }
         }
-        // Right arrow at the very end of the query accepts inline ghost completion (just like Nanolight!)
         if commandSelector == #selector(NSResponder.moveRight(_:)) {
             let sel = textView.selectedRange()
             let len = (searchField.stringValue as NSString).length
@@ -1002,6 +1121,9 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
             if isShowingWebPreview {
                 hideWebPreview()
+            } else if !searchField.stringValue.isEmpty {
+                searchField.stringValue = ""
+                runKeystrokeQuery("")
             } else {
                 onRequestDismiss?()
             }
@@ -1022,13 +1144,32 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         case .sectionHeader:
             return
 
-        case .calculator(let calc):
-            let textToCopy = (commandModified && calc.hex != nil) ? calc.hex! : calc.formatted
+        case .calculator(let calc, _, let sc):
+            let textToCopy = (commandModified && calc.hex != nil) ? (calc.hex ?? calc.formatted) : calc.formatted
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(textToCopy, forType: .string)
-            flashFooterMessage("✓ Copied \(textToCopy) to Clipboard")
 
-        case .app(let appHit, _, _):
+            copiedResetWork?.cancel()
+            isCalcRecentlyCopied = true
+            rows[row] = .calculator(calc, isCopied: true, shortcutNumber: sc)
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+            refreshRowSelectionStates()
+
+            let work = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    self.isCalcRecentlyCopied = false
+                    if row < self.rows.count, case .calculator(let cur, _, let curSc) = self.rows[row] {
+                        self.rows[row] = .calculator(cur, isCopied: false, shortcutNumber: curSc)
+                        self.tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+                        self.refreshRowSelectionStates()
+                    }
+                }
+            }
+            copiedResetWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+
+        case .app(let appHit, _):
             let appURL = URL(fileURLWithPath: appHit.app.path)
             if commandModified {
                 NSWorkspace.shared.activateFileViewerSelecting([appURL])
@@ -1077,7 +1218,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         }
     }
 
-    // MARK: - Optional In-Panel WKWebView Preview (Nanolight-style)
+    // MARK: - Optional In-Panel WKWebView Preview
 
     private func showWebPreview(url: URL) {
         activeWebPreviewURL = url
@@ -1086,7 +1227,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             web = existing
         } else {
             let cfg = WKWebViewConfiguration()
-            cfg.websiteDataStore = .nonPersistent() // Ephemeral: zero persistent cookies/tracking!
+            cfg.websiteDataStore = .nonPersistent()
             let created = WKWebView(frame: .zero, configuration: cfg)
             created.navigationDelegate = self
             created.uiDelegate = self
@@ -1109,11 +1250,11 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         web.isHidden = true
         activeWebPreviewURL = nil
 
-        var contentH: CGFloat = 6
+        var contentH: CGFloat = rows.isEmpty ? 0 : 12
         for item in rows {
-            contentH += item.rowHeight + tableView.intercellSpacing.height
+            contentH += item.rowHeight
         }
-        let desiredH = rows.isEmpty ? Self.collapsedHeight : (Self.collapsedHeight + contentH + Self.footerHeight + 4)
+        let desiredH = Self.headerHeight + Self.footerHeight + 2 + contentH
         resizePanelKeepingTopEdge(targetHeight: desiredH)
         updateFooterLabels()
         if restoreFocus {
@@ -1133,7 +1274,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
         return nil
     }
 
-    // MARK: - QuickLook Preview (Files & AI Chats)
+    // MARK: - QuickLook Preview
 
     public func toggleQuickLook() {
         let row = tableView.selectedRow
@@ -1147,7 +1288,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
                 onOpenConversation?(sid, q)
                 return
             }
-        case .app(let appHit, _, _):
+        case .app(let appHit, _):
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: appHit.app.path)])
             onRequestDismiss?()
             return
@@ -1172,7 +1313,7 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     }
 
     public func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard row >= 0, row < rows.count else { return 44 }
+        guard row >= 0, row < rows.count else { return 40 }
         return rows[row].rowHeight
     }
 
@@ -1182,12 +1323,15 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
+        refreshRowSelectionStates()
         updateSlidingSelectionPill(animated: true)
         updateFooterLabels()
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row >= 0, row < rows.count else { return nil }
+        let isSelected = (row == tableView.selectedRow)
+
         switch rows[row] {
         case .sectionHeader(let title):
             let id = NSUserInterfaceItemIdentifier("FMSSectionHeaderCell")
@@ -1196,32 +1340,46 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
             cell.configure(title: title)
             return cell
 
-        case .calculator(let calc):
+        case .calculator(let calc, let isCopied, _):
             let id = NSUserInterfaceItemIdentifier("FMSCalculatorCell")
-            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? CalculatorRowView)
-                ?? CalculatorRowView(identifier: id)
-            cell.configure(with: calc)
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? CalculatorHeroCardView)
+                ?? CalculatorHeroCardView(identifier: id)
+            cell.configure(with: calc, isCopied: isCopied)
             return cell
 
-        case .app(let appHit, _, let shortcutNumber):
-            let id = NSUserInterfaceItemIdentifier("FMSAppRowCell")
-            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? AppRowView)
-                ?? AppRowView(identifier: id)
-            cell.configure(with: appHit, icon: appIndex.icon(for: appHit.app.path), shortcutNumber: shortcutNumber)
+        case .app(let appHit, let shortcutNumber):
+            let id = NSUserInterfaceItemIdentifier("FMSNanolightRow")
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NanolightUnifiedRowView)
+                ?? NanolightUnifiedRowView(identifier: id)
+            cell.configureAsApp(
+                hit: appHit,
+                icon: appIndex.icon(for: appHit.app.path),
+                shortcutNumber: shortcutNumber,
+                isSelected: isSelected
+            )
             return cell
 
         case .searchHit(let hit, let matchedIndices, let shortcutNumber):
-            let id = NSUserInterfaceItemIdentifier("FMSHitCell")
-            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? HitRowView)
-                ?? HitRowView(identifier: id)
-            cell.configure(with: hit, matchedIndices: matchedIndices, shortcutNumber: shortcutNumber)
+            let id = NSUserInterfaceItemIdentifier("FMSNanolightRow")
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NanolightUnifiedRowView)
+                ?? NanolightUnifiedRowView(identifier: id)
+            cell.configureAsSearchHit(
+                hit: hit,
+                matchedIndices: matchedIndices,
+                shortcutNumber: shortcutNumber,
+                isSelected: isSelected
+            )
             return cell
 
         case .web(let webKind, let shortcutNumber):
-            let id = NSUserInterfaceItemIdentifier("FMSWebRowCell")
-            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? WebRowView)
-                ?? WebRowView(identifier: id)
-            cell.configure(with: webKind, shortcutNumber: shortcutNumber)
+            let id = NSUserInterfaceItemIdentifier("FMSNanolightRow")
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NanolightUnifiedRowView)
+                ?? NanolightUnifiedRowView(identifier: id)
+            cell.configureAsWeb(
+                kind: webKind,
+                shortcutNumber: shortcutNumber,
+                isSelected: isSelected
+            )
             return cell
         }
     }
@@ -1251,18 +1409,23 @@ public final class SearchOverlayController: NSViewController, NSTextFieldDelegat
     }
 }
 
-// MARK: - Row Views (Section Header, Calculator Hero Card, App Row, File/AI Hit Row, Web Row)
+// MARK: - Nanolight Cell Views
+
+@MainActor
+private protocol SelectableNanolightCell: AnyObject {
+    func setRowSelected(_ selected: Bool)
+}
 
 @MainActor
 private final class SectionHeaderCellView: NSTableCellView {
     private let label = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 734, height: 25))
+        super.init(frame: NSRect(x: 0, y: 0, width: 668, height: 28))
         self.identifier = identifier
-        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        label.textColor = .tertiaryLabelColor
-        label.frame = NSRect(x: 16, y: 4, width: 400, height: 15)
+        label.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        label.textColor = .secondaryLabelColor.withAlphaComponent(0.85)
+        label.frame = NSRect(x: 18, y: 4, width: 400, height: 16)
         addSubview(label)
     }
 
@@ -1274,142 +1437,149 @@ private final class SectionHeaderCellView: NSTableCellView {
     }
 }
 
+/// Nanolight / Raycast two-column Calculator Hero Card (`92pt` tall):
+/// `[ Expression ]  ──( → )──  [ 3,072 / Result · 0xC00 ]`
 @MainActor
-private final class CalculatorRowView: NSTableCellView {
+private final class CalculatorHeroCardView: NSTableCellView {
     private let exprLabel = NSTextField(labelWithString: "")
-    private let subtitleLabel = NSTextField(labelWithString: "Calculator · Return copies answer")
+    private let exprChip = NSView()
+    private let exprChipLabel = NSTextField(labelWithString: "Expression")
+
+    private let arrowCircle = NSView()
+    private let arrowIcon = NSImageView()
+
     private let answerLabel = NSTextField(labelWithString: "")
-    private let hexBadge = NSTextField(labelWithString: "")
+    private let resultChip = NSView()
+    private let resultChipLabel = NSTextField(labelWithString: "Result")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 734, height: 68))
+        super.init(frame: NSRect(x: 0, y: 0, width: 668, height: 92))
         self.identifier = identifier
 
-        exprLabel.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
-        exprLabel.textColor = .secondaryLabelColor
+        let halfW: CGFloat = (668 - 40 - 32 - 24) / 2
+
+        exprLabel.font = .monospacedDigitSystemFont(ofSize: 20, weight: .medium)
+        exprLabel.textColor = .labelColor.withAlphaComponent(0.85)
+        exprLabel.alignment = .center
         exprLabel.lineBreakMode = .byTruncatingMiddle
-        exprLabel.frame = NSRect(x: 20, y: 36, width: 320, height: 20)
+        exprLabel.frame = NSRect(x: 20, y: 44, width: halfW, height: 28)
         addSubview(exprLabel)
 
-        subtitleLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
-        subtitleLabel.textColor = .tertiaryLabelColor
-        subtitleLabel.frame = NSRect(x: 20, y: 14, width: 280, height: 16)
-        addSubview(subtitleLabel)
+        exprChip.wantsLayer = true
+        exprChip.layer?.cornerRadius = 6
+        exprChip.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        exprChipLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        exprChipLabel.textColor = .secondaryLabelColor
+        exprChipLabel.alignment = .center
+        exprChip.addSubview(exprChipLabel)
+        addSubview(exprChip)
+        exprChipLabel.sizeToFit()
+        let ecW = ceil(exprChipLabel.frame.width) + 16
+        exprChip.frame = NSRect(x: 20 + (halfW - ecW) / 2, y: 16, width: ecW, height: 20)
+        exprChipLabel.frame = NSRect(x: 0, y: 2.5, width: ecW, height: 15)
 
-        answerLabel.font = .monospacedDigitSystemFont(ofSize: 26, weight: .bold)
+        arrowCircle.wantsLayer = true
+        arrowCircle.layer?.cornerRadius = 16
+        arrowCircle.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        arrowCircle.frame = NSRect(x: 20 + halfW + 12, y: 30, width: 32, height: 32)
+        let arrowCfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        arrowIcon.image = NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil)?.withSymbolConfiguration(arrowCfg)
+        arrowIcon.contentTintColor = .secondaryLabelColor
+        arrowIcon.frame = NSRect(x: 8, y: 8, width: 16, height: 16)
+        arrowCircle.addSubview(arrowIcon)
+        addSubview(arrowCircle)
+
+        let rightX = 20 + halfW + 12 + 32 + 12
+        answerLabel.font = .monospacedDigitSystemFont(ofSize: 28, weight: .semibold)
         answerLabel.textColor = .labelColor
-        answerLabel.alignment = .right
+        answerLabel.alignment = .center
         answerLabel.lineBreakMode = .byTruncatingHead
-        answerLabel.frame = NSRect(x: 340, y: 26, width: 374, height: 32)
+        answerLabel.frame = NSRect(x: rightX, y: 42, width: halfW, height: 34)
         addSubview(answerLabel)
 
-        hexBadge.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
-        hexBadge.textColor = .systemCyan
-        hexBadge.alignment = .right
-        hexBadge.frame = NSRect(x: 480, y: 9, width: 234, height: 16)
-        addSubview(hexBadge)
+        resultChip.wantsLayer = true
+        resultChip.layer?.cornerRadius = 6
+        resultChipLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        resultChipLabel.alignment = .center
+        resultChip.addSubview(resultChipLabel)
+        addSubview(resultChip)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(with calc: CalcAnswerPayload) {
-        exprLabel.stringValue = "\(calc.expression) ="
+    func configure(with calc: CalcAnswerPayload, isCopied: Bool) {
+        let halfW: CGFloat = (668 - 40 - 32 - 24) / 2
+        let rightX = 20 + halfW + 12 + 32 + 12
+
+        exprLabel.stringValue = calc.expression
         answerLabel.stringValue = calc.formatted
-        if let hex = calc.hex {
-            hexBadge.isHidden = false
-            hexBadge.stringValue = hex
-            answerLabel.frame = NSRect(x: 340, y: 26, width: 374, height: 32)
+
+        if isCopied {
+            resultChipLabel.stringValue = "Copied"
+            resultChipLabel.textColor = .systemGreen
+            resultChip.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.18).cgColor
         } else {
-            hexBadge.isHidden = true
-            answerLabel.frame = NSRect(x: 340, y: 18, width: 374, height: 32)
+            if let hex = calc.hex {
+                resultChipLabel.stringValue = "Result · \(hex)"
+            } else {
+                resultChipLabel.stringValue = "Result"
+            }
+            resultChipLabel.textColor = .secondaryLabelColor
+            resultChip.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
         }
+
+        resultChipLabel.sizeToFit()
+        let rcW = ceil(resultChipLabel.frame.width) + 16
+        resultChip.frame = NSRect(x: rightX + (halfW - rcW) / 2, y: 16, width: rcW, height: 20)
+        resultChipLabel.frame = NSRect(x: 0, y: 2.5, width: rcW, height: 15)
     }
 }
 
+/// Single-line `40pt` Nanolight Row:
+/// `[26x26 Icon / Tile]   BoldMatchedTitle  MutedInlineSubtitle           [Open ↩] or [⌘2]`
 @MainActor
-private final class AppRowView: NSTableCellView {
+private final class NanolightUnifiedRowView: NSTableCellView, SelectableNanolightCell {
+    private static var fileIconCache: [String: NSImage] = [:]
+
+    private let tileBg = NSView()
     private let iconView = NSImageView()
-    private let nameLabel = NSTextField(labelWithString: "")
-    private let folderLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
+    private let lineLabel = NSTextField(labelWithString: "")
+
+    private let selectedVerbLabel = NSTextField(labelWithString: "Open")
+    private let selectedKeycap = KeycapBadgeView(text: "↩")
+    private let shortcutLabel = NSTextField(labelWithString: "")
+
+    private var currentVerb: String = "Open"
+    private var currentShortcutNumber: Int?
 
     init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 734, height: 44))
+        super.init(frame: NSRect(x: 0, y: 0, width: 668, height: 40))
         self.identifier = identifier
 
-        iconView.frame = NSRect(x: 16, y: 7, width: 30, height: 30)
+        tileBg.wantsLayer = true
+        tileBg.layer?.cornerRadius = 6
+        tileBg.frame = NSRect(x: 18, y: 7, width: 26, height: 26)
+        addSubview(tileBg)
+
+        iconView.frame = NSRect(x: 18, y: 7, width: 26, height: 26)
         addSubview(iconView)
 
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.frame = NSRect(x: 56, y: 13, width: 380, height: 19)
-        addSubview(nameLabel)
+        lineLabel.lineBreakMode = .byTruncatingTail
+        lineLabel.frame = NSRect(x: 54, y: 10, width: 515, height: 20)
+        addSubview(lineLabel)
 
-        folderLabel.font = .systemFont(ofSize: 12, weight: .regular)
-        folderLabel.textColor = .tertiaryLabelColor
-        folderLabel.lineBreakMode = .byTruncatingTail
-        folderLabel.frame = NSRect(x: 440, y: 13, width: 150, height: 17)
-        addSubview(folderLabel)
+        selectedVerbLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        selectedVerbLabel.textColor = .secondaryLabelColor
+        selectedVerbLabel.alignment = .right
+        addSubview(selectedVerbLabel)
+        addSubview(selectedKeycap)
 
-        badgeLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        badgeLabel.textColor = .secondaryLabelColor
-        badgeLabel.alignment = .right
-        badgeLabel.frame = NSRect(x: 595, y: 13, width: 120, height: 17)
-        addSubview(badgeLabel)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(with hit: RankedAppHit, icon: NSImage, shortcutNumber: Int?) {
-        iconView.image = icon
-
-        let baseColor = hit.matchedCharIndices.isEmpty
-            ? NSColor.labelColor
-            : NSColor.labelColor.withAlphaComponent(0.76)
-        nameLabel.attributedStringValue = LauncherMatcher.attributedHighlightedTitle(
-            hit.app.name,
-            matchedCharIndices: hit.matchedCharIndices,
-            baseFont: .systemFont(ofSize: 14, weight: .medium),
-            boldFont: .systemFont(ofSize: 14, weight: .bold),
-            baseColor: baseColor,
-            highlightColor: .labelColor
-        )
-        folderLabel.stringValue = hit.app.folder
-        badgeLabel.stringValue = shortcutNumber != nil ? "Application · ⌥\(shortcutNumber!)" : "Application"
-    }
-}
-
-@MainActor
-private final class HitRowView: NSTableCellView {
-    private static var iconCache: [String: NSImage] = [:]
-
-    private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let subtitleLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
-
-    init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 734, height: 50))
-        self.identifier = identifier
-
-        iconView.frame = NSRect(x: 16, y: 9, width: 30, height: 30)
-        addSubview(iconView)
-
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.frame = NSRect(x: 56, y: 26, width: 495, height: 18)
-        addSubview(titleLabel)
-
-        subtitleLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.lineBreakMode = .byTruncatingTail
-        subtitleLabel.frame = NSRect(x: 56, y: 7, width: 505, height: 16)
-        addSubview(subtitleLabel)
-
-        badgeLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
-        badgeLabel.alignment = .right
-        badgeLabel.frame = NSRect(x: 568, y: 17, width: 147, height: 16)
-        addSubview(badgeLabel)
+        shortcutLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        shortcutLabel.textColor = .secondaryLabelColor.withAlphaComponent(0.55)
+        shortcutLabel.alignment = .right
+        shortcutLabel.frame = NSRect(x: 610, y: 11, width: 42, height: 17)
+        addSubview(shortcutLabel)
     }
 
     @available(*, unavailable)
@@ -1417,142 +1587,209 @@ private final class HitRowView: NSTableCellView {
 
     private static func cachedFileIcon(for hit: RankedHitPayload) -> NSImage {
         if hit.is_dir {
-            if let cached = iconCache["__dir__"] { return cached }
+            if let cached = fileIconCache["__dir__"] { return cached }
             let img = NSWorkspace.shared.icon(for: .folder)
-            iconCache["__dir__"] = img
+            fileIconCache["__dir__"] = img
             return img
         }
         let ext = (hit.filename as NSString).pathExtension.lowercased()
         let key = ext.isEmpty ? "__file__" : ext
-        if let cached = iconCache[key] {
-            return cached
-        }
+        if let cached = fileIconCache[key] { return cached }
         let utType = UTType(filenameExtension: ext) ?? .data
         let img = NSWorkspace.shared.icon(for: utType)
-        if iconCache.count > 256 {
-            iconCache.removeAll(keepingCapacity: true)
+        if fileIconCache.count > 256 {
+            fileIconCache.removeAll(keepingCapacity: true)
         }
-        iconCache[key] = img
+        fileIconCache[key] = img
         return img
     }
 
-    func configure(with hit: RankedHitPayload, matchedIndices: [Int], shortcutNumber: Int?) {
+    private func buildInlineLine(
+        title: String,
+        matchedIndices: [Int],
+        subtitle: String,
+        subtitleColor: NSColor = .secondaryLabelColor.withAlphaComponent(0.78)
+    ) -> NSAttributedString {
         let baseColor = matchedIndices.isEmpty
             ? NSColor.labelColor
-            : NSColor.labelColor.withAlphaComponent(0.78)
-        titleLabel.attributedStringValue = LauncherMatcher.attributedHighlightedTitle(
-            hit.filename,
-            matchedCharIndices: matchedIndices,
-            baseFont: .systemFont(ofSize: 13.5, weight: .medium),
-            boldFont: .systemFont(ofSize: 13.5, weight: .bold),
-            baseColor: baseColor,
-            highlightColor: .labelColor
-        )
-
-        let shortcutSuffix = shortcutNumber != nil ? " · ⌥\(shortcutNumber!)" : ""
-
-        if hit.is_llm_chat {
-            let prov = ConversationViewerWindowController.displayProviderName(hit.llm_provider ?? hit.volume_name)
-            let (sym, color) = ConversationViewerWindowController.providerSymbolAndColor(prov)
-            let cfg = NSImage.SymbolConfiguration(pointSize: 19, weight: .semibold)
-            iconView.image = NSImage(systemSymbolName: sym, accessibilityDescription: prov)?.withSymbolConfiguration(cfg)
-            iconView.contentTintColor = color
-
-            if let ws = hit.workspace, !ws.isEmpty {
-                let shortWs = (ws as NSString).lastPathComponent
-                subtitleLabel.stringValue = hit.snippet.isEmpty
-                    ? "Workspace: \(shortWs)"
-                    : "\(shortWs)  —  \(hit.snippet)"
-            } else {
-                subtitleLabel.stringValue = hit.snippet.isEmpty ? "Encrypted AI Conversation" : hit.snippet
-            }
-
-            badgeLabel.textColor = color
-            badgeLabel.stringValue = "✦ \(prov)\(shortcutSuffix)"
-            return
-        }
-
-        iconView.contentTintColor = nil
-        iconView.image = Self.cachedFileIcon(for: hit)
-        subtitleLabel.stringValue = hit.snippet.isEmpty ? hit.path : "\(hit.path)  —  \(hit.snippet)"
-
-        if hit.volume_online {
-            badgeLabel.textColor = .secondaryLabelColor
-            badgeLabel.stringValue = "\(hit.matched_layers.joined(separator: "+"))\(shortcutSuffix)"
-        } else {
-            badgeLabel.textColor = .systemOrange
-            badgeLabel.stringValue = "OFFLINE · \(hit.volume_name)"
-        }
-    }
-}
-
-@MainActor
-private final class WebRowView: NSTableCellView {
-    private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let badgeLabel = NSTextField(labelWithString: "")
-
-    init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 734, height: 40))
-        self.identifier = identifier
-
-        iconView.frame = NSRect(x: 19, y: 9, width: 22, height: 22)
-        iconView.contentTintColor = .secondaryLabelColor
-        addSubview(iconView)
-
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.frame = NSRect(x: 56, y: 11, width: 520, height: 18)
-        addSubview(titleLabel)
-
-        badgeLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        badgeLabel.textColor = .secondaryLabelColor
-        badgeLabel.alignment = .right
-        badgeLabel.frame = NSRect(x: 585, y: 11, width: 130, height: 17)
-        addSubview(badgeLabel)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(with kind: WebRowKind, shortcutNumber: Int?) {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-        iconView.image = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: kind.badge)?.withSymbolConfiguration(cfg)
-
-        // Like Nanolight: draw the added completion words in bold!
-        if case .googleSuggestion(let typed, let suggestion) = kind,
-           suggestion.lowercased().hasPrefix(typed.lowercased()),
-           suggestion.count > typed.count
-        {
-            let prefixStr = String(suggestion.prefix(typed.count))
-            let addedStr = String(suggestion.dropFirst(typed.count))
-            let attr = NSMutableAttributedString(
-                string: prefixStr,
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13.5, weight: .regular),
-                    .foregroundColor: NSColor.secondaryLabelColor
-                ]
+            : NSColor.labelColor.withAlphaComponent(0.82)
+        let mutable = NSMutableAttributedString(
+            attributedString: LauncherMatcher.attributedHighlightedTitle(
+                title,
+                matchedCharIndices: matchedIndices,
+                baseFont: .systemFont(ofSize: 13.5, weight: .medium),
+                boldFont: .systemFont(ofSize: 13.5, weight: .bold),
+                baseColor: baseColor,
+                highlightColor: .labelColor
             )
-            attr.append(
+        )
+        if !subtitle.isEmpty {
+            mutable.append(
                 NSAttributedString(
-                    string: addedStr,
+                    string: "   \(subtitle)",
                     attributes: [
-                        .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
-                        .foregroundColor: NSColor.labelColor
+                        .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                        .foregroundColor: subtitleColor
                     ]
                 )
             )
-            titleLabel.attributedStringValue = attr
+        }
+        return mutable
+    }
+
+    func configureAsApp(hit: RankedAppHit, icon: NSImage, shortcutNumber: Int?, isSelected: Bool) {
+        tileBg.isHidden = true
+        iconView.frame = NSRect(x: 18, y: 7, width: 26, height: 26)
+        iconView.contentTintColor = nil
+        iconView.image = icon
+
+        lineLabel.attributedStringValue = buildInlineLine(
+            title: hit.app.name,
+            matchedIndices: hit.matchedCharIndices,
+            subtitle: hit.app.folder
+        )
+        currentVerb = "Open"
+        currentShortcutNumber = shortcutNumber
+        setRowSelected(isSelected)
+    }
+
+    func configureAsSearchHit(hit: RankedHitPayload, matchedIndices: [Int], shortcutNumber: Int?, isSelected: Bool) {
+        if hit.is_llm_chat {
+            let prov = ConversationViewerWindowController.displayProviderName(hit.llm_provider ?? hit.volume_name)
+            let (sym, color) = ConversationViewerWindowController.providerSymbolAndColor(prov)
+            tileBg.isHidden = false
+            tileBg.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
+
+            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+            iconView.frame = NSRect(x: 22, y: 11, width: 18, height: 18)
+            iconView.image = NSImage(systemSymbolName: sym, accessibilityDescription: prov)?.withSymbolConfiguration(cfg)
+            iconView.contentTintColor = color
+
+            let sub: String
+            if !hit.snippet.isEmpty {
+                sub = "✦ \(prov) · \(hit.snippet)"
+            } else if let ws = hit.workspace, !ws.isEmpty {
+                sub = "✦ \(prov) · \((ws as NSString).lastPathComponent)"
+            } else {
+                sub = "✦ \(prov)"
+            }
+            lineLabel.attributedStringValue = buildInlineLine(
+                title: hit.filename,
+                matchedIndices: matchedIndices,
+                subtitle: sub,
+                subtitleColor: color.withAlphaComponent(0.9)
+            )
+            currentVerb = "Read"
         } else {
-            titleLabel.attributedStringValue = NSAttributedString(
-                string: kind.title,
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 13.5, weight: .medium),
-                    .foregroundColor: NSColor.labelColor
-                ]
+            tileBg.isHidden = true
+            iconView.frame = NSRect(x: 18, y: 7, width: 26, height: 26)
+            iconView.contentTintColor = nil
+            iconView.image = Self.cachedFileIcon(for: hit)
+
+            let parentDir = ((hit.path as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath
+            let sub = hit.volume_online
+                ? parentDir
+                : "OFFLINE · Connect \(hit.volume_name)"
+            let subColor: NSColor = hit.volume_online
+                ? .secondaryLabelColor.withAlphaComponent(0.75)
+                : .systemOrange
+            lineLabel.attributedStringValue = buildInlineLine(
+                title: hit.filename,
+                matchedIndices: matchedIndices,
+                subtitle: sub,
+                subtitleColor: subColor
+            )
+            currentVerb = "Open"
+        }
+
+        currentShortcutNumber = shortcutNumber
+        setRowSelected(isSelected)
+    }
+
+    func configureAsWeb(kind: WebRowKind, shortcutNumber: Int?, isSelected: Bool) {
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        tileBg.isHidden = false
+        tileBg.layer?.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.09)
+            : NSColor.black.withAlphaComponent(0.06)).cgColor
+
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .medium)
+        iconView.frame = NSRect(x: 22, y: 11, width: 18, height: 18)
+        iconView.image = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        iconView.contentTintColor = .secondaryLabelColor
+
+        if case .googleSuggestion(let typed, let suggestion) = kind {
+            let typedChars = Array(typed)
+            let sugChars = Array(suggestion)
+            var prefixMatch = sugChars.count > typedChars.count
+            if prefixMatch {
+                for idx in 0..<typedChars.count where typedChars[idx].lowercased() != sugChars[idx].lowercased() {
+                    prefixMatch = false
+                    break
+                }
+            }
+            if prefixMatch {
+                let prefixStr = String(sugChars[0..<typedChars.count])
+                let addedStr = String(sugChars[typedChars.count...])
+                let attr = NSMutableAttributedString(
+                    string: prefixStr,
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 13.5, weight: .regular),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
+                )
+                attr.append(
+                    NSAttributedString(
+                        string: addedStr,
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold),
+                            .foregroundColor: NSColor.labelColor
+                        ]
+                    )
+                )
+                lineLabel.attributedStringValue = attr
+            } else {
+                lineLabel.attributedStringValue = buildInlineLine(title: suggestion, matchedIndices: [], subtitle: "Google")
+            }
+        } else {
+            lineLabel.attributedStringValue = buildInlineLine(
+                title: kind.title,
+                matchedIndices: [],
+                subtitle: kind.subtitle
             )
         }
 
-        let shortcutSuffix = shortcutNumber != nil ? " · ⌥\(shortcutNumber!)" : ""
-        badgeLabel.stringValue = "\(kind.badge)\(shortcutSuffix)"
+        currentVerb = "Go"
+        currentShortcutNumber = shortcutNumber
+        setRowSelected(isSelected)
+    }
+
+    func setRowSelected(_ selected: Bool) {
+        if selected {
+            shortcutLabel.isHidden = true
+            selectedVerbLabel.isHidden = false
+            selectedKeycap.isHidden = false
+            selectedVerbLabel.stringValue = currentVerb
+            selectedVerbLabel.sizeToFit()
+            selectedKeycap.refreshColors()
+
+            let capSize = selectedKeycap.frame.size
+            let capX = 652 - capSize.width
+            selectedKeycap.frame = NSRect(x: capX, y: 10.5, width: capSize.width, height: capSize.height)
+            let verbW = ceil(selectedVerbLabel.frame.width) + 4
+            selectedVerbLabel.frame = NSRect(x: capX - verbW - 6, y: 11, width: verbW, height: 17)
+            lineLabel.frame = NSRect(x: 54, y: 10, width: max(180, capX - verbW - 68), height: 20)
+        } else {
+            selectedVerbLabel.isHidden = true
+            selectedKeycap.isHidden = true
+            if let num = currentShortcutNumber {
+                shortcutLabel.isHidden = false
+                shortcutLabel.stringValue = "⌘\(num)"
+                lineLabel.frame = NSRect(x: 54, y: 10, width: 548, height: 20)
+            } else {
+                shortcutLabel.isHidden = true
+                lineLabel.frame = NSRect(x: 54, y: 10, width: 590, height: 20)
+            }
+        }
     }
 }

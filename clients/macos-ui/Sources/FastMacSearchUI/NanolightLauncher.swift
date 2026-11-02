@@ -76,7 +76,11 @@ public enum MathCalculator {
         mutating func consume(_ target: Character, alt: Character? = nil) -> Bool {
             skipSpaces()
             guard i < chars.count else { return false }
-            if chars[i] == target || (alt != nil && chars[i] == alt!) {
+            if chars[i] == target {
+                i += 1
+                return true
+            }
+            if let altChar = alt, chars[i] == altChar {
                 i += 1
                 return true
             }
@@ -267,8 +271,8 @@ public enum LauncherMatcher {
 
         let qChars = Array(query)
         let nChars = Array(name)
-        let qLower = qChars.map { Character($0.lowercased()) }
-        let nLower = nChars.map { Character($0.lowercased()) }
+        let qLower: [String] = qChars.map { $0.lowercased() }
+        let nLower: [String] = nChars.map { $0.lowercased() }
 
         let slack = min(max(0, nChars.count - qChars.count), 60)
 
@@ -278,13 +282,14 @@ public enum LauncherMatcher {
         }
 
         // Tier 2: Prefix of name
-        if nLower.starts(with: qLower) {
+        if qLower.count <= nLower.count && nLower.starts(with: qLower) {
             return LauncherMatch(score: 900 - slack, matchedCharIndices: Array(0..<qChars.count))
         }
 
         // Tier 3: Word-start or CamelCase boundary ("code" in Visual Studio Code, "time" in FaceTime)
-        if qLower.count <= nLower.count {
-            for start in 1...(nLower.count - qLower.count) {
+        if qLower.count < nLower.count {
+            let maxStart = nLower.count - qLower.count
+            for start in 1..<(maxStart + 1) {
                 if isWordStart(nChars, at: start) && sliceEquals(nLower, from: start, needle: qLower) {
                     return LauncherMatch(
                         score: 800 - slack - min(start, 60),
@@ -301,7 +306,8 @@ public enum LauncherMatcher {
 
         // Tier 5: Substring anywhere
         if qLower.count <= nLower.count {
-            for start in 0...(nLower.count - qLower.count) {
+            let maxStart = nLower.count - qLower.count
+            for start in 0..<(maxStart + 1) {
                 if sliceEquals(nLower, from: start, needle: qLower) {
                     return LauncherMatch(
                         score: 600 - slack - min(start, 60),
@@ -322,6 +328,7 @@ public enum LauncherMatcher {
 
     private static func isWordStart(_ chars: [Character], at i: Int) -> Bool {
         if i <= 0 { return true }
+        guard i < chars.count else { return false }
         let prev = chars[i - 1]
         let cur = chars[i]
         if prev == " " || prev == "-" || prev == "_" || prev == "." || prev == "/" || prev == "(" {
@@ -330,8 +337,8 @@ public enum LauncherMatcher {
         return cur.isUppercase && prev.isLowercase
     }
 
-    private static func sliceEquals(_ hay: [Character], from start: Int, needle: [Character]) -> Bool {
-        guard start + needle.count <= hay.count else { return false }
+    private static func sliceEquals(_ hay: [String], from start: Int, needle: [String]) -> Bool {
+        guard start >= 0, start + needle.count <= hay.count else { return false }
         for k in 0..<needle.count where hay[start + k] != needle[k] {
             return false
         }
@@ -339,9 +346,9 @@ public enum LauncherMatcher {
     }
 
     private static func matchInitials(
-        qLower: [Character],
+        qLower: [String],
         nChars: [Character],
-        nLower: [Character],
+        nLower: [String],
         slack: Int
     ) -> LauncherMatch? {
         let qCompact = qLower.filter { $0 != " " }
@@ -372,9 +379,9 @@ public enum LauncherMatcher {
     }
 
     private static func matchSubsequence(
-        qLower: [Character],
+        qLower: [String],
         nChars: [Character],
-        nLower: [Character],
+        nLower: [String],
         slack: Int
     ) -> LauncherMatch? {
         let qCompact = qLower.filter { $0 != " " }
@@ -386,7 +393,6 @@ public enum LauncherMatcher {
         var wordBoundaryHits = 0
 
         for qch in qCompact {
-            // Prefer matching a word-start if available right ahead, otherwise next matching char
             var foundIdx: Int?
             var scan = ni
             while scan < nLower.count {
@@ -405,8 +411,9 @@ public enum LauncherMatcher {
             ni = chosen + 1
         }
 
-        let span = (matched.last! - matched.first! + 1) - qCompact.count
-        let startPenalty = min(matched[0] * 3, 45)
+        guard let first = matched.first, let last = matched.last else { return nil }
+        let span = max(0, (last - first + 1) - qCompact.count)
+        let startPenalty = min(first * 3, 45)
         let spreadPenalty = min(span * 8, 180)
         let boundaryBonus = wordBoundaryHits * 18
         let pts = max(140, 460 + boundaryBonus - spreadPenalty - startPenalty - slack / 2)
@@ -420,9 +427,9 @@ public enum LauncherMatcher {
     }
 
     private static func matchTypo(
-        qLower: [Character],
+        qLower: [String],
         nChars: [Character],
-        nLower: [Character],
+        nLower: [String],
         slack: Int
     ) -> LauncherMatch? {
         let maxErrs = allowedTypos(for: qLower.count)
@@ -435,7 +442,7 @@ public enum LauncherMatcher {
             guard wordLen >= max(2, qLower.count - maxErrs) else { continue }
             let word = Array(nLower[s..<(s + wordLen)])
             if let (errs, localHits) = damerauPrefixDistance(query: qLower, word: word, maxErrs: maxErrs) {
-                if best == nil || errs < best!.errs {
+                if best == nil || errs < (best?.errs ?? Int.max) {
                     let globalHits = localHits.map { s + $0 }
                     best = (errs, s, globalHits)
                     if errs == 1 && s == 0 { break }
@@ -449,41 +456,42 @@ public enum LauncherMatcher {
     }
 
     private static func damerauPrefixDistance(
-        query q: [Character],
-        word w: [Character],
+        query q: [String],
+        word w: [String],
         maxErrs: Int
     ) -> (Int, [Int])? {
         let m = q.count
         let n = w.count
-        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
-        for i in 0...m { dp[i][0] = i }
-        for j in 0...n { dp[0][j] = j }
+        guard m > 0, n > 0 else { return nil }
 
-        for i in 1...m {
-            for j in 1...n {
+        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        for i in 0..<(m + 1) { dp[i][0] = i }
+        for j in 0..<(n + 1) { dp[0][j] = j }
+
+        for i in 1..<(m + 1) {
+            for j in 1..<(n + 1) {
                 let cost = (q[i - 1] == w[j - 1]) ? 0 : 1
                 var v = min(
-                    dp[i - 1][j] + 1,      // deletion
+                    dp[i - 1][j] + 1,
                     min(
-                        dp[i][j - 1] + 1,  // insertion
-                        dp[i - 1][j - 1] + cost // substitution
+                        dp[i][j - 1] + 1,
+                        dp[i - 1][j - 1] + cost
                     )
                 )
                 if i > 1 && j > 1 && q[i - 1] == w[j - 2] && q[i - 2] == w[j - 1] {
-                    v = min(v, dp[i - 2][j - 2] + 1) // adjacent transposition
+                    v = min(v, dp[i - 2][j - 2] + 1)
                 }
                 dp[i][j] = v
             }
         }
 
-        // Match against any prefix j of `word`
         var bestErrs = maxErrs + 1
         var bestEnd = 0
         let minJ = max(1, m - maxErrs)
         let maxJ = min(n, m + maxErrs)
         guard minJ <= maxJ else { return nil }
 
-        for j in minJ...maxJ {
+        for j in minJ..<(maxJ + 1) {
             if dp[m][j] < bestErrs {
                 bestErrs = dp[m][j]
                 bestEnd = j
@@ -491,7 +499,6 @@ public enum LauncherMatcher {
         }
         guard bestErrs <= maxErrs else { return nil }
 
-        // Backtrack matched indices in `word`
         var hits: [Int] = []
         var i = m
         var j = bestEnd
@@ -582,6 +589,8 @@ public final class AppLauncherIndex {
     private var launchCounts: [String: Int] = [:]
     private var iconCache: [String: NSImage] = [:]
     private var lastRescanDate: Date = .distantPast
+
+    public var appCount: Int { apps.count }
 
     public init() {
         if let saved = UserDefaults.standard.dictionary(forKey: Self.launchCountsDefaultsKey) as? [String: Int] {
